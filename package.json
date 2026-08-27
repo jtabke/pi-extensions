@@ -1,0 +1,17 @@
+{
+  "name": "@jtabke/pi-extensions",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal Pi extensions shared across clients",
+  "keywords": [
+    "pi-package"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/*/index.ts"
+    ]
+  }
+}
