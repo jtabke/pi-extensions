@@ -6,15 +6,23 @@ Personal [Pi](https://github.com/earendil-works/pi-mono) extensions shared acros
 
 ### `luna-fast`
 
-Adds `service_tier: "priority"` to eligible ChatGPT-authenticated GPT-5.6 Luna requests.
+Adds `service_tier: "priority"` to enabled ChatGPT-authenticated OpenAI Codex requests. Enable Fast mode for whichever supported model is currently selected:
 
 ```text
-/luna-fast on
-/luna-fast off
-/luna-fast status
+/fast
+/fast off
+/fast status
 ```
 
-The machine-local setting remains in `~/.pi/agent/extensions/luna-fast.json` and is not stored in this repository.
+Control Luna explicitly through the same command:
+
+```text
+/fast luna
+/fast luna off
+/fast luna status
+```
+
+Fast mode is stored per model in `~/.pi/agent/extensions/luna-fast.json`. The old `{ "enabled": boolean }` format remains compatible and controls Luna only. Models from other providers and non-ChatGPT authentication do not support this extension's Fast mode. The machine-local setting is not stored in this repository.
 
 ### `notify`
 
