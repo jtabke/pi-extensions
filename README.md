@@ -14,6 +14,14 @@ Adds `service_tier: "priority"` to enabled ChatGPT-authenticated OpenAI Codex re
 /fast status
 ```
 
+`/fast status` reports both the current model and subagent settings. Control both together with:
+
+```text
+/fast all on
+/fast all off
+/fast all status
+```
+
 Control Luna explicitly through the same command:
 
 ```text

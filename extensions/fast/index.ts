@@ -117,6 +117,14 @@ function setSubagentsEnabled(enabled: boolean): void {
 	writeConfig(config);
 }
 
+function setModelAndSubagentsEnabled(modelId: string, enabled: boolean): void {
+	const config = readConfig();
+	if (enabled) config.enabledModels.add(modelId);
+	else config.enabledModels.delete(modelId);
+	config.subagents = enabled;
+	writeConfig(config);
+}
+
 export default function fast(pi: ExtensionAPI): void {
 	migrateLegacyConfig();
 
@@ -148,15 +156,47 @@ export default function fast(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("fast", {
-		description: "Control Fast mode for the current model, Luna, or subagents",
+		description: "Control Fast mode for the current model, subagents, or both",
 		handler: async (args, ctx) => {
 			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
-			const target = parts[0] === "luna" || parts[0] === "subagents" ? parts[0] : "current";
+			const target = parts[0] === "luna" || parts[0] === "subagents" || parts[0] === "all"
+				? parts[0]
+				: "current";
 			const action = (target === "current" ? parts[0] : parts[1]) || "on";
-			const usage = "Usage: /fast [on | off | status] | /fast luna [on | off | status] | /fast subagents [on | off | status]";
+			const usage = "Usage: /fast [on | off | status] | /fast all [on | off | status] | /fast luna [on | off | status] | /fast subagents [on | off | status]";
 
 			if (parts.length > (target === "current" ? 1 : 2)) {
 				ctx.ui.notify(usage, "warning");
+				return;
+			}
+
+			if (action === "status" && (target === "current" || target === "all")) {
+				const config = readConfig();
+				const model = ctx.model;
+				const modelName = model?.name ?? "Current model";
+				const modelStatus = model && isEligible(ctx)
+					? config.enabledModels.has(model.id) ? "on" : "off"
+					: "unsupported";
+				ctx.ui.notify(
+					`Fast mode for ${modelName}: ${modelStatus}.\nSubagent Fast mode: ${config.subagents ? "on" : "off"}.`,
+					"info",
+				);
+				return;
+			}
+
+			if (target === "all" && (action === "on" || action === "off")) {
+				const model = ctx.model;
+				if (!model || !isEligible(ctx)) {
+					ctx.ui.notify("The current model or authentication does not support this Fast mode.", "warning");
+					return;
+				}
+
+				const enabled = action === "on";
+				setModelAndSubagentsEnabled(model.id, enabled);
+				ctx.ui.notify(
+					`Fast mode is ${enabled ? "on" : "off"} for ${model.name} and subagents.`,
+					"info",
+				);
 				return;
 			}
 
@@ -186,25 +226,17 @@ export default function fast(pi: ExtensionAPI): void {
 					ctx.ui.notify(`Luna Fast mode is ${enabled ? "on" : "off"}.`, "info");
 					return;
 				}
-			} else {
+			} else if (action === "on" || action === "off") {
 				const model = ctx.model;
-				if (action === "status" || action === "on" || action === "off") {
-					if (!model || !isEligible(ctx)) {
-						ctx.ui.notify("The current model or authentication does not support this Fast mode.", "warning");
-						return;
-					}
-
-					if (action === "status") {
-						const enabled = readConfig().enabledModels.has(model.id);
-						ctx.ui.notify(`Fast mode is ${enabled ? "on" : "off"} for ${model.name}.`, "info");
-						return;
-					}
-
-					const enabled = action === "on";
-					setModelEnabled(model.id, enabled);
-					ctx.ui.notify(`Fast mode is ${enabled ? "on" : "off"} for ${model.name}.`, "info");
+				if (!model || !isEligible(ctx)) {
+					ctx.ui.notify("The current model or authentication does not support this Fast mode.", "warning");
 					return;
 				}
+
+				const enabled = action === "on";
+				setModelEnabled(model.id, enabled);
+				ctx.ui.notify(`Fast mode is ${enabled ? "on" : "off"} for ${model.name}.`, "info");
+				return;
 			}
 
 			ctx.ui.notify(usage, "warning");
