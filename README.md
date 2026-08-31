@@ -4,7 +4,7 @@ Personal [Pi](https://github.com/earendil-works/pi-mono) extensions shared acros
 
 ## Extensions
 
-### `luna-fast`
+### `fast`
 
 Adds `service_tier: "priority"` to enabled ChatGPT-authenticated OpenAI Codex requests. Enable Fast mode for whichever supported model is currently selected:
 
@@ -22,7 +22,17 @@ Control Luna explicitly through the same command:
 /fast luna status
 ```
 
-Fast mode is stored per model in `~/.pi/agent/extensions/luna-fast.json`. The old `{ "enabled": boolean }` format remains compatible and controls Luna only. Models from other providers and non-ChatGPT authentication do not support this extension's Fast mode. The machine-local setting is not stored in this repository.
+Enable Fast mode as the default for every supported native `pi-subagents` workflow child:
+
+```text
+/fast subagents on
+/fast subagents off
+/fast subagents status
+```
+
+The subagent toggle adds `fast: true` to workflow launches that do not already set `fast`. Individual launches can still opt out with `fast: false`. Fast mode supports only the native OpenAI Codex models allowed by `pi-subagents`; external runners and unsupported models fail through its normal validation.
+
+Fast mode settings are stored in `~/.pi/agent/extensions/fast.json`. On startup, the extension migrates the former `luna-fast.json` file automatically. The old `{ "enabled": boolean }` format remains compatible and controls Luna only. Models from other providers and non-ChatGPT authentication do not support this extension's parent-session Fast mode. The machine-local setting is not stored in this repository.
 
 ### `notify`
 
