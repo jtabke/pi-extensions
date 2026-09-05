@@ -6,10 +6,17 @@ Personal [Pi](https://github.com/earendil-works/pi-mono) extensions shared acros
 
 ### `fast`
 
-Adds `service_tier: "priority"` to enabled ChatGPT-authenticated OpenAI Codex requests. Enable Fast mode for whichever supported model is currently selected:
+Adds `service_tier: "priority"` to enabled ChatGPT-authenticated OpenAI Codex requests. Run `/fast` to open a configuration menu for:
+
+- One list of parent models with saved On/Off settings, marking the current parent. Unavailable saved models can be disabled.
+- The subagent-wide On/Off setting.
+
+Menu changes and inline On/Off commands save immediately and persist across sessions; they are not temporary overrides. Escape cancels the open selection; it does not undo earlier changes. With no saved configuration, Luna is on, other parent models are off, and the subagent-wide setting is off. Priority service may increase quota usage or cost.
+
+Inline controls remain available, including without an interactive UI:
 
 ```text
-/fast
+/fast on
 /fast off
 /fast status
 ```
@@ -38,9 +45,15 @@ Enable Fast mode as the default for every supported native `pi-subagents` workfl
 /fast subagents status
 ```
 
-The subagent toggle adds `fast: true` to workflow launches that do not already set `fast`. Individual launches can still opt out with `fast: false`. Fast mode supports only the native OpenAI Codex models allowed by `pi-subagents`; external runners and unsupported models fail through its normal validation.
+The subagent toggle adds `fast: true` to inline `workflowScript` launches that do not already set `fast`. Explicit `fast: true` and `fast: false` values are preserved; turning the default off does not force launches off. Fast mode supports only the native OpenAI Codex models allowed by `pi-subagents`; external runners and unsupported models fail through its normal validation.
 
 Fast mode settings are stored in `~/.pi/agent/extensions/fast.json`. On startup, the extension migrates the former `luna-fast.json` file automatically. The old `{ "enabled": boolean }` format remains compatible and controls Luna only. Models from other providers and non-ChatGPT authentication do not support this extension's parent-session Fast mode. The machine-local setting is not stored in this repository.
+
+Focused Fast extension tests (requires Bun):
+
+```bash
+bun test tests/fast.test.ts
+```
 
 ### `notify`
 
