@@ -57,7 +57,7 @@ bun test tests/fast.test.ts
 
 ### `notify`
 
-Sends a native notification when Pi finishes an agent turn and waits for input.
+Sends a native notification when the parent Pi session finishes an agent turn and waits for input. Subagent processes do not send notifications.
 
 ```text
 /notify-toggle [on|off|status]

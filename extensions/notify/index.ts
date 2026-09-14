@@ -20,6 +20,7 @@ import { execFile } from "node:child_process";
 const LOG = join(homedir(), ".pi", "agent", "notify-debug.log");
 const SETTINGS = join(homedir(), ".pi", "agent", "notify-settings.json");
 const PROCESS_TIMEOUT_MS = 5000;
+const IS_SUBAGENT = process.env.PI_SUBAGENT_CHILD === "1";
 
 type NotifySettings = {
 	enabled: boolean;
@@ -175,6 +176,8 @@ function notify(title: string, body: string): void {
 }
 
 export default function (pi: ExtensionAPI) {
+	if (IS_SUBAGENT) return;
+
 	log(`[notify] extension loaded enabled=${settings.enabled} minDurationMs=${settings.minDurationMs}`);
 
 	pi.registerCommand("notify-toggle", {
