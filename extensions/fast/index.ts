@@ -15,7 +15,7 @@ import { dirname, join } from "node:path";
 
 const PROVIDER_ID = "openai-codex";
 const API_ID = "openai-codex-responses";
-const LUNA_MODEL_ID = "gpt-5.6-luna";
+const LUNA_MODEL_ID = "gpt-6-luna";
 const SERVICE_TIER = "priority";
 const CONFIG_PATH = join(getAgentDir(), "extensions", "fast.json");
 const LEGACY_CONFIG_PATH = join(getAgentDir(), "extensions", "luna-fast.json");

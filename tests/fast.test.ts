@@ -8,8 +8,8 @@ const configDir = join(agentDir, "extensions");
 const configPath = join(configDir, "fast.json");
 mock.module("@earendil-works/pi-coding-agent", () => ({ getAgentDir: () => agentDir }));
 const { default: fast } = await import("../extensions/fast/index.ts");
-const luna = { id: "gpt-5.6-luna", name: "Luna", provider: "openai-codex", api: "openai-codex-responses" };
-const sol = { ...luna, id: "gpt-5.6-sol", name: "Sol" };
+const luna = { id: "gpt-6-luna", name: "Luna", provider: "openai-codex", api: "openai-codex-responses" };
+const sol = { ...luna, id: "gpt-6-sol", name: "Sol" };
 const unsupported = { ...sol, provider: "openai" };
 
 beforeEach(() => {
