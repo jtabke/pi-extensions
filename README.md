@@ -13,6 +13,8 @@ Adds `service_tier: "priority"` to enabled ChatGPT-authenticated OpenAI Codex re
 
 Menu changes and inline On/Off commands save immediately and persist across sessions; they are not temporary overrides. Escape cancels the open selection; it does not undo earlier changes. With no saved configuration, Luna is on, other parent models are off, and the subagent-wide setting is off. Priority service may increase quota usage or cost.
 
+Manually registered Codex models, including `gpt-6.1-sol`, appear in the menu when ChatGPT authentication is available. Select the model in Pi, then run `/fast on` to save its Fast setting. No extension model-list update is needed.
+
 Inline controls remain available, including without an interactive UI:
 
 ```text

@@ -177,6 +177,18 @@ test("legacy Luna settings migrate and remain visible in the menu", async () => 
 	expect(config()).toEqual({ enabledModels: [luna.id], subagents: false });
 });
 
+test("GPT-6.1 Sol can enable Fast without a hard-coded model allowlist", async () => {
+	const sol61 = { ...sol, id: "gpt-6.1-sol", name: "GPT-6.1 Sol" };
+	const h = harness([sol61.id, "On", "Done"], sol61);
+	h.ctx.modelRegistry.getAvailable = () => [luna, sol, sol61, unsupported];
+	await h.command();
+	expect(config()).toEqual({ enabledModels: [luna.id, sol61.id].sort(), subagents: false });
+	const payload = { model: sol61.id };
+	expect(h.events.before_provider_request({ payload }, h.ctx)).toEqual({ ...payload, service_tier: "priority" });
+	await h.command("off");
+	expect(h.events.before_provider_request({ payload }, h.ctx)).toBeUndefined();
+});
+
 test("parent payload safeguards preserve explicit tiers and reject mismatched or unsupported requests", () => {
 	const h = harness([], luna);
 	for (const payload of [{ model: luna.id, service_tier: "auto" }, { model: sol.id }, null, []]) {
