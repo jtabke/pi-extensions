@@ -113,6 +113,15 @@ function fixture(config?: unknown) {
 		calls,
 		names,
 		notices,
+		nextResponse: () => { work = deferred(); },
+		addTurns: (count: number) => {
+			for (let i = 0; i < count; i++) {
+				branch.push(
+					{ type: "message", message: { role: "user", content: "Discuss database migrations" } },
+					{ type: "message", message: { role: "assistant", content: "Plan database migration steps", stopReason: "stop" } },
+				);
+			}
+		},
 		branch,
 		dialogs,
 		pick: (value?: string, callback?: () => void) => {
@@ -435,6 +444,112 @@ test("failed atomic write preserves prior choice and cleans owned temporary file
 	f.resolve();
 	await settled;
 	assert.equal(f.calls.length, 1);
+});
+
+test("refines after five more user turns, then ten; unchanged titles do not emit changes", async () => {
+	const f = fixture(selected);
+	let settled = f.emit("agent_settled");
+	f.resolve();
+	await settled;
+	f.addTurns(4);
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 1);
+	f.addTurns(1);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 2);
+	assert.match(f.calls[1].input.systemPrompt, /Rename only if/);
+	assert.match(f.calls[1].input.messages[0].content, /Current title:\nFix Session Naming Races/);
+	assert.match(f.calls[1].input.messages[0].content, /database migrations/);
+	assert.ok(!f.calls[1].input.messages[0].content.includes("Implemented race protection"));
+	f.resolve(response("Plan Database Migration Steps"));
+	await settled;
+	assert.deepEqual(f.names, ["Fix Session Naming Races", "Plan Database Migration Steps"]);
+	f.addTurns(9);
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 2);
+	f.addTurns(1);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	f.resolve(response("Plan Database Migration Steps"));
+	await settled;
+	assert.equal(f.calls.length, 3);
+	assert.equal(f.names.length, 2);
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 3);
+});
+
+test("refinement excludes private blocks and bounds recent text", async () => {
+	const f = fixture(selected);
+	let settled = f.emit("agent_settled");
+	f.resolve();
+	await settled;
+	f.addTurns(5);
+	f.branch.at(-2).message.content = [{ type: "image", data: "private image" }, { type: "text", text: "u".repeat(2000) }];
+	f.branch.at(-1).message.content = [{ type: "thinking", thinking: "private thought" }, { type: "text", text: "a".repeat(1000) }];
+	f.branch.push({ type: "message", message: { role: "toolResult", content: "private tool" } });
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	const excerpt = f.calls[1].input.messages[0].content;
+	assert.ok(excerpt.includes("u".repeat(1600)));
+	assert.ok(!excerpt.includes("u".repeat(1601)));
+	assert.ok(excerpt.includes("a".repeat(800)));
+	assert.ok(!excerpt.includes("a".repeat(801)));
+	assert.ok(!excerpt.includes("private"));
+	f.resolve();
+	await settled;
+});
+
+test("manual changes, off, replacement and shutdown cancel refinement; manual names stay protected", async () => {
+	for (const action of ["manual", "clear", "off", "switch", "shutdown"]) {
+		const f = fixture(selected);
+		let settled = f.emit("agent_settled");
+		f.resolve();
+		await settled;
+		f.addTurns(5);
+		f.nextResponse();
+		settled = f.emit("agent_settled");
+		const resolve = f.resolve;
+		if (action === "manual") f.manual("Owner title");
+		if (action === "clear") f.manual(undefined);
+		if (action === "off") await f.command("off");
+		if (action === "switch") f.switch();
+		if (action === "shutdown") f.emit("session_shutdown");
+		await settled;
+		assert.equal(f.calls[1].options.signal.aborted, true);
+		resolve(response("Stale Refined Session Title"));
+		await Promise.resolve();
+		assert.deepEqual(f.names, ["Fix Session Naming Races"]);
+		if (action === "manual" || action === "clear") {
+			f.addTurns(20);
+			await f.command("chosen/family/title-model");
+			await f.emit("agent_settled");
+			assert.equal(f.calls.length, 2);
+		}
+	}
+});
+
+test("failed refinement keeps title and waits ten more user turns", async () => {
+	const f = fixture(selected);
+	let settled = f.emit("agent_settled");
+	f.resolve();
+	await settled;
+	f.addTurns(5);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	f.reject();
+	await settled;
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 2);
+	assert.equal(f.names.length, 1);
+	f.addTurns(10);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	f.resolve(response("Plan Database Migration Steps"));
+	await settled;
+	assert.equal(f.calls.length, 3);
+	assert.equal(f.names.length, 2);
 });
 
 test.after(() => rmSync(agentDir, { recursive: true, force: true }));
