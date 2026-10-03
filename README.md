@@ -4,6 +4,31 @@ Personal [Pi](https://github.com/earendil-works/pi-mono) extensions shared acros
 
 ## Extensions
 
+### `auto-session-name`
+
+Names an unnamed native Pi session after its first completed exchange at `agent_settled`. Naming is disabled until you explicitly select an authenticated model; it never falls back to the session model.
+
+```text
+/auto-name-model provider/model-id
+/auto-name-model
+/auto-name-model status
+/auto-name-model off
+```
+
+Model IDs can contain `/`. The command validates the model and configured authentication before saving. Selection does not send a request; the next settled boundary may try. Each session instance gets one attempt, with another permitted after explicit model selection. Status reports the current choice.
+
+The global file is `getAgentDir()/extensions/auto-session-name.json` (normally `~/.pi/agent/extensions/auto-session-name.json`). Its only fields are `{"provider":"provider-id","model":"model-id"}`; `off` writes `{"provider":null,"model":null}`. Missing or invalid configuration disables naming; invalid configuration warns and is not repaired automatically. No credentials or transcripts are stored there.
+
+Privacy: up to 1600 characters of the first user text and 800 characters of the first assistant text on the active branch leave Pi for the selected provider. Tools, thinking, images, and metadata are excluded. The request has a 15-second limit, 96 output tokens, no retries, and no prompt-cache retention. The title is capped at 80 characters. Pi alone persists the title; history filenames and session IDs do not change. Existing and in-flight manual names are protected. Session replacement, shutdown, name changes, and explicit model changes cancel this extension's request; stale results cannot name a replacement session.
+
+Validated against installed Pi **1.0.0**, not the repository's older development SDK. Focused tests use Node **26.5** and isolated configuration, with no provider calls:
+
+```bash
+node --experimental-test-module-mocks --test extensions/auto-session-name/index.test.ts
+```
+
+Focused strict type validation uses TypeScript 5.9.3 with a temporary out-of-repository tsconfig: `strict`, `noEmit`, `skipLibCheck`, `target: ES2023`, `module: ESNext`, `moduleResolution: Bundler`, `allowImportingTsExtensions`, Node types, and a `paths` mapping of `@earendil-works/pi-coding-agent` to the installed 1.0.0 `dist/index.d.ts`. Include only this extension and test, then run `tsc -p /path/to/temporary/tsconfig.json`. No dependencies were upgraded and no installation was performed. Fully restart Pi after owner-approved activation changes.
+
 ### `fast`
 
 Adds `service_tier: "priority"` to enabled ChatGPT-authenticated OpenAI Codex requests. Run `/fast` to open a configuration menu for:
