@@ -15,6 +15,8 @@ Names an unnamed native Pi session after its first completed exchange at `agent_
 /auto-name-model off
 ```
 
+Run `/auto-name-model` without arguments to open a list of authenticated models. Escape leaves the saved choice unchanged. If no authenticated models are available, the command suggests `/login`. Without an interactive UI, the no-argument command reports status instead. `/auto-name-model status` always reports the current choice.
+
 Model IDs can contain `/`. The command validates the model and configured authentication before saving. Selection does not send a request; the next settled boundary may try. Each session instance gets one attempt, with another permitted after explicit model selection. Status reports the current choice.
 
 The global file is `getAgentDir()/extensions/auto-session-name.json` (normally `~/.pi/agent/extensions/auto-session-name.json`). Its only fields are `{"provider":"provider-id","model":"model-id"}`; `off` writes `{"provider":null,"model":null}`. Missing or invalid configuration disables naming; invalid configuration warns and is not repaired automatically. No credentials or transcripts are stored there.

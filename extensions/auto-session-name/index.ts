@@ -148,7 +148,20 @@ export default function autoSessionName(pi: ExtensionAPI): void {
 				.map((value) => ({ value, label: value }));
 		},
 		handler: async (args, ctx) => {
-			const input = args.trim();
+			let input = args.trim();
+			if (!input && ctx.hasUI) {
+				const models = ctx.modelRegistry.getAvailable();
+				if (models.length === 0) {
+					ctx.ui.notify("Auto-name: no authenticated models available; use /login first.", "warning");
+					return;
+				}
+				const picked = await ctx.ui.select(
+					"Choose auto-name model",
+					models.map((model) => `${model.provider}/${model.id}`),
+				);
+				if (picked === undefined) return;
+				input = picked;
+			}
 			if (!input || input === "status") {
 				ctx.ui.notify(
 					choice

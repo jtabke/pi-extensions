@@ -46,6 +46,10 @@ function fixture(config?: unknown) {
 	let id = "session-A";
 	let name: string | undefined;
 	let authenticated = true;
+	let hasUI = true;
+	let selection: string | undefined;
+	let onSelect: (() => void) | undefined;
+	const dialogs: { title: string; options: string[] }[] = [];
 	let work = deferred();
 	const calls: { model: any; input: any; options: any }[] = [];
 	const names: string[] = [];
@@ -81,7 +85,15 @@ function fixture(config?: unknown) {
 				return { result: () => work.promise };
 			},
 		},
-		ui: { notify: (text: string) => notices.push(text) },
+		get hasUI() { return hasUI; },
+		ui: {
+			notify: (text: string) => notices.push(text),
+			select: async (title: string, options: string[]) => {
+				dialogs.push({ title, options });
+				onSelect?.();
+				return selection;
+			},
+		},
 	};
 	extension({
 		on: (event: string, handler: Function) => events.set(event, handler),
@@ -102,6 +114,12 @@ function fixture(config?: unknown) {
 		names,
 		notices,
 		branch,
+		dialogs,
+		pick: (value?: string, callback?: () => void) => {
+			selection = value;
+			onSelect = callback;
+		},
+		ui: (value: boolean) => { hasUI = value; },
 		emit,
 		command: (args: string) => command.handler(args, ctx),
 		completions: (prefix: string) => command.getArgumentCompletions(prefix),
@@ -135,7 +153,7 @@ test("explicit model command persists, completes, rejects invalid choices, and d
 	await f.emit("agent_settled");
 	assert.equal(f.calls.length, 0);
 	assert.throws(() => readFileSync(configPath));
-	await f.command("");
+	await f.command("status");
 	assert.match(f.notices.at(-1)!, /disabled/);
 	assert.deepEqual(f.completions("chosen/"), [
 		{ value: "chosen/family/title-model", label: "chosen/family/title-model" },
@@ -156,6 +174,54 @@ test("explicit model command persists, completes, rejects invalid choices, and d
 		model: null,
 	});
 	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 0);
+});
+
+test("no-argument command opens model picker and saves selection without a provider request", async () => {
+	const f = fixture();
+	f.pick("chosen/family/title-model");
+	await f.command("");
+	assert.deepEqual(f.dialogs, [{
+		title: "Choose auto-name model",
+		options: ["chosen/family/title-model"],
+	}]);
+	assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), selected);
+	assert.equal(f.calls.length, 0);
+	await f.command("status");
+	assert.equal(f.dialogs.length, 1);
+	const settled = f.emit("agent_settled");
+	f.resolve();
+	await settled;
+	assert.deepEqual(f.names, ["Fix Session Naming Races"]);
+});
+
+test("picker cancellation preserves disabled or selected config", async () => {
+	for (const config of [undefined, selected]) {
+		const f = fixture(config);
+		await f.command("");
+		assert.equal(f.dialogs.length, 1);
+		assert.equal(f.calls.length, 0);
+		if (config) assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), config);
+		else assert.throws(() => readFileSync(configPath));
+	}
+});
+
+test("empty model list, noninteractive status, and lost authentication do not save a choice", async () => {
+	const f = fixture();
+	f.auth(false);
+	await f.command("");
+	assert.equal(f.dialogs.length, 0);
+	assert.match(f.notices.at(-1)!, /no authenticated models/);
+	f.ui(false);
+	await f.command("");
+	assert.equal(f.dialogs.length, 0);
+	assert.match(f.notices.at(-1)!, /disabled/);
+	f.ui(true);
+	f.auth(true);
+	f.pick("chosen/family/title-model", () => f.auth(false));
+	await f.command("");
+	assert.match(f.notices.at(-1)!, /authentication not configured/);
+	assert.throws(() => readFileSync(configPath));
 	assert.equal(f.calls.length, 0);
 });
 
