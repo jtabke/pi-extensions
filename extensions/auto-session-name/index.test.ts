@@ -110,7 +110,14 @@ function fixture(config?: unknown) {
 		},
 	} as any);
 	install();
-	const emit = (event: string, data: any = {}) => events.get(event)!(data, ctx);
+	const emitRaw = (event: string, data: any = {}) => events.get(event)!(data, ctx);
+	const emit = (event: string, data: any = {}) => {
+		const result = emitRaw(event, data);
+		// Drain detached naming completions in assertions, not in production handlers.
+		return event === "agent_settled"
+			? Promise.resolve(result).then(() => new Promise<void>((resolve) => setImmediate(resolve)))
+			: result;
+	};
 	emit("session_start");
 	return {
 		calls,
@@ -133,6 +140,7 @@ function fixture(config?: unknown) {
 		},
 		ui: (value: boolean) => { hasUI = value; },
 		emit,
+		emitRaw,
 		reopen: () => { emit("session_shutdown"); install(); emit("session_start"); },
 		command: (args: string) => command.handler(args, ctx),
 		completions: (prefix: string) => command.getArgumentCompletions(prefix),
@@ -496,7 +504,7 @@ test("refines after five more user turns, then every five; unchanged titles do n
 	f.addTurns(1);
 	f.nextResponse();
 	settled = f.emit("agent_settled");
-	await f.emit("agent_settled");
+	f.emitRaw("agent_settled");
 	assert.equal(f.calls.length, 2);
 	assert.match(f.calls[1].input.systemPrompt, /Rename only if/);
 	assert.match(f.calls[1].input.messages[0].content, /Current title:\nFix Session Naming Races/);
@@ -692,6 +700,75 @@ test("minor changes keep the exact title without emitting a rename", async () =>
 	await settled;
 	assert.equal(f.calls.length, 2);
 	assert.deepEqual(f.names, ["Fix Session Naming Races"]);
+});
+
+test("refinement returns immediately and prevents overlapping requests", async () => {
+	const f = fixture(selected);
+	const initial = f.emit("agent_settled");
+	f.resolve();
+	await initial;
+	f.addTurns(5);
+	f.nextResponse();
+	assert.equal(f.emitRaw("agent_settled"), undefined);
+	assert.equal(f.calls.length, 2);
+	// The provider is still unresolved, but settlement has returned.
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 2);
+	assert.deepEqual(f.names, ["Fix Session Naming Races"]);
+	f.resolve(response("Plan Database Migration Steps"));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.deepEqual(f.names, ["Fix Session Naming Races", "Plan Database Migration Steps"]);
+});
+
+test("checks not yet due do not read assistant text; due checks read only recent text", async () => {
+	const f = fixture(selected);
+	const initial = f.emit("agent_settled");
+	f.resolve();
+	await initial;
+	Object.defineProperty(f.branch[1].message, "content", {
+		get() { throw new Error("Old assistant text must not be read"); },
+	});
+	// These entries still count as user turns, but do not yet trigger refinement.
+	f.addTurns(4);
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 1);
+	assert.deepEqual(f.notices, []);
+	f.addTurns(1);
+	f.nextResponse();
+	const settled = f.emit("agent_settled");
+	assert.equal(f.calls.length, 2);
+	assert.match(f.calls[1].input.messages[0].content, /database migrations/);
+	f.resolve();
+	await settled;
+	assert.deepEqual(f.notices, []);
+});
+
+test("unchanged refinement writes only its scheduled check; changed titles save ownership", async () => {
+	const f = fixture(selected);
+	const states = () => f.branch.filter((entry) => entry.customType === "auto-session-name");
+	let settled = f.emit("agent_settled");
+	f.resolve();
+	await settled;
+	assert.equal(states().length, 1);
+	f.addTurns(5);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	assert.equal(states().length, 2);
+	f.resolve();
+	await settled;
+	assert.equal(states().length, 2);
+	assert.deepEqual(states().at(-1).data, { title: "Fix Session Naming Races", nextRefinement: 11 });
+	f.reopen();
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 2);
+	f.addTurns(5);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	assert.equal(states().length, 3);
+	f.resolve(response("Plan Database Migration Steps"));
+	await settled;
+	assert.equal(states().length, 4);
+	assert.deepEqual(states().at(-1).data, { title: "Plan Database Migration Steps", nextRefinement: 16 });
 });
 
 test.after(() => rmSync(agentDir, { recursive: true, force: true }));

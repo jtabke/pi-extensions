@@ -88,13 +88,24 @@ function firstUser(ctx: ExtensionContext, incoming?: string): string | undefined
 	if (incoming?.trim()) return `User:\n${incoming.slice(0, 1600)}`;
 }
 
-function recentConversation(ctx: ExtensionContext): {
-	turns: number;
-	excerpt: string;
-} {
+type Branch = ReturnType<ExtensionContext["sessionManager"]["getBranch"]>;
+
+function userTurns(branch: Branch): number {
 	let turns = 0;
+	for (const entry of branch) {
+		if (entry.type !== "message" || entry.message.role !== "user") continue;
+		const content = entry.message.content;
+		if (typeof content === "string"
+			? content.trim()
+			: content.some((part) => part.type === "text" && part.text.trim())) turns++;
+	}
+	return turns;
+}
+
+function recentConversation(branch: Branch): string {
 	const recent: string[] = [];
-	for (const entry of ctx.sessionManager.getBranch()) {
+	for (let i = branch.length - 1; i >= 0 && recent.length < 10; i--) {
+		const entry = branch[i];
 		if (entry.type !== "message") continue;
 		const message = entry.message;
 		if (message.role !== "user" && message.role !== "assistant") continue;
@@ -106,7 +117,6 @@ function recentConversation(ctx: ExtensionContext): {
 						.map((part) => part.text)
 						.join("\n");
 		if (!text.trim()) continue;
-		if (message.role === "user") turns++;
 		if (
 			message.role === "assistant" &&
 			(message.stopReason === "error" || message.stopReason === "aborted")
@@ -114,9 +124,8 @@ function recentConversation(ctx: ExtensionContext): {
 		recent.push(
 			`${message.role === "user" ? "User" : "Assistant"}:\n${text.slice(0, message.role === "user" ? 1600 : 800)}`,
 		);
-		if (recent.length > 10) recent.shift();
 	}
-	return { turns, excerpt: recent.join("\n\n") };
+	return recent.reverse().join("\n\n");
 }
 
 function titleFrom(text: string): string {
@@ -276,9 +285,20 @@ export default function autoSessionName(pi: ExtensionAPI): void {
 		if (event.message.role !== "user" || automaticName !== undefined) return;
 		const content = event.message.content;
 		const text = typeof content === "string" ? content : content.filter((part) => part.type === "text").map((part) => part.text).join("\n");
-		if (text.trim()) void nameSession(ctx, text);
+		if (text.trim()) startNaming(ctx, text);
 	});
-	pi.on("agent_settled", (_event, ctx) => nameSession(ctx));
+	pi.on("agent_settled", (_event, ctx) => {
+		if (automaticName !== undefined) startNaming(ctx);
+		else return nameSession(ctx);
+	});
+
+	function startNaming(ctx: ExtensionContext, incoming?: string): void {
+		const capturedGeneration = generation;
+		void nameSession(ctx, incoming).catch(() => {
+			if (generation === capturedGeneration)
+				ctx.ui.notify("Auto-name: naming request failed.", "warning");
+		});
+	}
 
 	async function nameSession(ctx: ExtensionContext, incoming?: string): Promise<void> {
 		if (!choice || manual || pending) return;
@@ -287,14 +307,15 @@ export default function autoSessionName(pi: ExtensionAPI): void {
 		const capturedName = pi.getSessionName();
 		const refining = automaticName !== undefined && capturedName === automaticName;
 		if (!refining && (attempted || capturedName)) return;
-		const recent = recentConversation(ctx);
-		if (refining && recent.turns < nextRefinement) return;
+		const branch = ctx.sessionManager.getBranch();
+		const turns = userTurns(branch);
+		if (refining && turns < nextRefinement) return;
 		const excerpt = refining
-			? `Current title:\n${capturedName}\n\nRecent conversation:\n${recent.excerpt}`
+			? `Current title:\n${capturedName}\n\nRecent conversation:\n${recentConversation(branch)}`
 			: firstUser(ctx, incoming);
 		if (!excerpt) return;
 		if (refining) {
-			nextRefinement = recent.turns + 5;
+			nextRefinement = turns + 5;
 			pi.appendEntry<NamingState>(STATE_TYPE, { title: automaticName!, nextRefinement });
 		} else attempted = true;
 		const model = ctx.modelRegistry.find(choice.provider, choice.model);
@@ -361,12 +382,13 @@ export default function autoSessionName(pi: ExtensionAPI): void {
 			if (title) {
 				automaticName = title;
 				// message_end is dispatched before the incoming user is persisted.
-				if (!refining) nextRefinement = recent.turns + (incoming !== undefined ? 1 : 0) + 5;
+				if (!refining) nextRefinement = turns + (incoming !== undefined ? 1 : 0) + 5;
 				if (title !== capturedName) {
 					expectedNameEvent = title;
 					pi.setSessionName(title);
 				}
-				pi.appendEntry<NamingState>(STATE_TYPE, { title, nextRefinement });
+				if (!refining || title !== capturedName)
+					pi.appendEntry<NamingState>(STATE_TYPE, { title, nextRefinement });
 			}
 		} catch {
 			if (!controller.signal.aborted && generation === capturedGeneration)
