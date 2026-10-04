@@ -74,7 +74,7 @@ function fixture(config?: unknown) {
 	];
 	const ctx = {
 		model: { provider: "wrong", id: "never-use" },
-		sessionManager: { getSessionId: () => id, getBranch: () => branch },
+		sessionManager: { getSessionId: () => id, getBranch: () => branch, getEntries: () => branch },
 		modelRegistry: {
 			find: (provider: string, modelId: string) =>
 				provider === model.provider && modelId === model.id ? model : undefined,
@@ -95,7 +95,8 @@ function fixture(config?: unknown) {
 			},
 		},
 	};
-	extension({
+	const install = () => extension({
+		appendEntry: (customType: string, data: unknown) => branch.push({ type: "custom", customType, data }),
 		on: (event: string, handler: Function) => events.set(event, handler),
 		registerCommand: (_name: string, definition: any) => {
 			command = definition;
@@ -103,11 +104,13 @@ function fixture(config?: unknown) {
 		getSessionName: () => name,
 		setSessionName: (title: string) => {
 			name = title;
+			branch.push({ type: "session_info", name: title });
 			names.push(title);
 			events.get("session_info_changed")!({ name: title }, ctx);
 		},
 	} as any);
-	const emit = (event: string) => events.get(event)!({}, ctx);
+	install();
+	const emit = (event: string, data: any = {}) => events.get(event)!(data, ctx);
 	emit("session_start");
 	return {
 		calls,
@@ -130,6 +133,7 @@ function fixture(config?: unknown) {
 		},
 		ui: (value: boolean) => { hasUI = value; },
 		emit,
+		reopen: () => { emit("session_shutdown"); install(); emit("session_start"); },
 		command: (args: string) => command.handler(args, ctx),
 		completions: (prefix: string) => command.getArgumentCompletions(prefix),
 		get resolve() {
@@ -139,13 +143,17 @@ function fixture(config?: unknown) {
 		reject: () => work.reject(new Error("private payload")),
 		manual: (value: string | undefined) => {
 			name = value;
-			emit("session_info_changed");
+			branch.push({ type: "session_info", name: value });
+			emit("session_info_changed", { name: value });
 		},
 		auth: (value: boolean) => {
 			authenticated = value;
 		},
 		switch: (next = "session-B") => {
 			id = next;
+			for (let i = branch.length - 1; i >= 0; i--) {
+				if (branch[i].type === "session_info" || branch[i].customType === "auto-session-name") branch.splice(i, 1);
+			}
 			name = undefined;
 			work = deferred();
 			emit("session_start");
@@ -258,7 +266,7 @@ test("invalid configs warn, stay unchanged, and never fall back", async () => {
 	}
 });
 
-test("first branch exchange, explicit model, bounded text and request options; one attempt", async () => {
+test("first user only, explicit model, bounded text and request options; one attempt", async () => {
 	const f = fixture(selected);
 	f.branch.unshift({ type: "custom", data: "secret metadata" });
 	f.branch[1].message.content = [
@@ -280,7 +288,7 @@ test("first branch exchange, explicit model, bounded text and request options; o
 	});
 	assert.equal(
 		call.input.messages[0].content,
-		`User:\n${"u".repeat(1600)}\n\nAssistant:\n${("Implemented race protection\n" + "a".repeat(1000)).slice(0, 800)}`,
+		`User:\n${"u".repeat(1600)}`,
 	);
 	assert.match(call.input.systemPrompt, /3-8-word/);
 	assert.deepEqual(Object.keys(call.options).sort(), [
@@ -303,20 +311,51 @@ test("first branch exchange, explicit model, bounded text and request options; o
 	assert.equal(f.calls.length, 1);
 });
 
-test("no complete first exchange or preexisting native name means no request", async () => {
-	for (const kind of ["user-only", "empty", "second-user", "name"]) {
+test("empty user text or preexisting native name means no request", async () => {
+	for (const kind of ["empty", "name"]) {
 		const f = fixture(selected);
-		if (kind === "user-only") f.branch.pop();
 		if (kind === "empty") f.branch[0].message.content = " ";
-		if (kind === "second-user")
-			f.branch.splice(1, 0, {
-				type: "message",
-				message: { role: "user", content: "new exchange" },
-			});
 		if (kind === "name") f.setNativeName("Owner title");
 		await f.emit("agent_settled");
 		assert.equal(f.calls.length, 0);
 	}
+});
+
+test("first nonempty user triggers naming before persistence or assistant text without blocking", async () => {
+	const f = fixture(selected);
+	f.branch.length = 0;
+	const empty = { role: "user", content: [{ type: "image", data: "private" }, { type: "text", text: " " }] };
+	await f.emit("message_end", { message: empty });
+	assert.equal(f.calls.length, 0);
+	f.branch.push({ type: "message", message: empty });
+	const user = { role: "user", content: "Build database migrations" };
+	await f.emit("message_end", { message: user });
+	assert.equal(f.calls.length, 1);
+	assert.equal(f.calls[0].input.messages[0].content, "User:\nBuild database migrations");
+	f.branch.push({ type: "message", message: user });
+	f.resolve(response("Build Database Migration Steps"));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.deepEqual(f.names, ["Build Database Migration Steps"]);
+	f.addTurns(4);
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 1);
+	f.addTurns(1);
+	f.nextResponse();
+	const settled = f.emit("agent_settled");
+	f.resolve(response("Build Database Migration Steps"));
+	await settled;
+	assert.equal(f.calls.length, 2);
+});
+
+test("initial naming skips empty users and ignores assistant errors and later users", async () => {
+	const f = fixture(selected);
+	f.branch[1].message.stopReason = "aborted";
+	f.branch.unshift({ type: "message", message: { role: "user", content: " " } });
+	f.addTurns(1);
+	const settled = f.emit("agent_settled");
+	assert.equal(f.calls[0].input.messages[0].content, "User:\nFix session naming");
+	f.resolve();
+	await settled;
 });
 
 test("normalization uses first nonempty text line and rejects empty/error/aborted", async () => {
@@ -446,7 +485,7 @@ test("failed atomic write preserves prior choice and cleans owned temporary file
 	assert.equal(f.calls.length, 1);
 });
 
-test("refines after five more user turns, then ten; unchanged titles do not emit changes", async () => {
+test("refines after five more user turns, then every five; unchanged titles do not emit changes", async () => {
 	const f = fixture(selected);
 	let settled = f.emit("agent_settled");
 	f.resolve();
@@ -466,7 +505,7 @@ test("refines after five more user turns, then ten; unchanged titles do not emit
 	f.resolve(response("Plan Database Migration Steps"));
 	await settled;
 	assert.deepEqual(f.names, ["Fix Session Naming Races", "Plan Database Migration Steps"]);
-	f.addTurns(9);
+	f.addTurns(4);
 	await f.emit("agent_settled");
 	assert.equal(f.calls.length, 2);
 	f.addTurns(1);
@@ -530,7 +569,7 @@ test("manual changes, off, replacement and shutdown cancel refinement; manual na
 	}
 });
 
-test("failed refinement keeps title and waits ten more user turns", async () => {
+test("failed refinement keeps title and waits five more user turns", async () => {
 	const f = fixture(selected);
 	let settled = f.emit("agent_settled");
 	f.resolve();
@@ -543,13 +582,116 @@ test("failed refinement keeps title and waits ten more user turns", async () => 
 	await f.emit("agent_settled");
 	assert.equal(f.calls.length, 2);
 	assert.equal(f.names.length, 1);
-	f.addTurns(10);
+	f.addTurns(5);
 	f.nextResponse();
 	settled = f.emit("agent_settled");
 	f.resolve(response("Plan Database Migration Steps"));
 	await settled;
 	assert.equal(f.calls.length, 3);
 	assert.equal(f.names.length, 2);
+});
+
+test("reopening an automatic title restores the five-turn schedule", async () => {
+	const f = fixture(selected);
+	let settled = f.emit("agent_settled");
+	f.resolve();
+	await settled;
+	f.addTurns(4);
+	f.reopen();
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 1);
+	f.addTurns(1);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	f.resolve(response("Plan Database Migration Steps"));
+	await settled;
+	assert.deepEqual(f.names, ["Fix Session Naming Races", "Plan Database Migration Steps"]);
+	f.reopen();
+	f.addTurns(4);
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 2);
+	f.addTurns(1);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	f.resolve(response("Plan Database Migration Steps"));
+	await settled;
+	assert.equal(f.calls.length, 3);
+	assert.equal(f.names.length, 2);
+});
+
+test("reopening after a failed refinement preserves its five-turn wait", async () => {
+	const f = fixture(selected);
+	let settled = f.emit("agent_settled");
+	f.resolve();
+	await settled;
+	f.addTurns(5);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	f.reject();
+	await settled;
+	f.reopen();
+	f.addTurns(4);
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 2);
+	f.addTurns(1);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	f.resolve();
+	await settled;
+	assert.equal(f.calls.length, 3);
+});
+
+test("reopening protects manual renames, same-title assignments, clearing, and unmarked titles", async () => {
+	for (const title of ["Owner title", "Fix Session Naming Races", undefined]) {
+		const f = fixture(selected);
+		const settled = f.emit("agent_settled");
+		f.resolve();
+		await settled;
+		f.manual(title);
+		f.reopen();
+		f.addTurns(20);
+		await f.command("chosen/family/title-model");
+		await f.emit("agent_settled");
+		assert.equal(f.calls.length, 1);
+	}
+	const f = fixture(selected);
+	f.setNativeName("Legacy Automatic Or Manual Title");
+	f.reopen();
+	f.addTurns(20);
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 0);
+});
+
+test("a later native name entry protects manual changes made without this extension", async () => {
+	const f = fixture(selected);
+	const settled = f.emit("agent_settled");
+	f.resolve();
+	await settled;
+	// Even assigning the same title must remove automatic ownership.
+	f.branch.push({ type: "session_info", name: "Fix Session Naming Races" });
+	f.reopen();
+	f.addTurns(20);
+	await f.emit("agent_settled");
+	assert.equal(f.calls.length, 1);
+});
+
+test("minor changes keep the exact title without emitting a rename", async () => {
+	const f = fixture(selected);
+	let settled = f.emit("agent_settled");
+	f.resolve();
+	await settled;
+	for (let i = 0; i < 5; i++) f.branch.push(
+		{ type: "message", message: { role: "user", content: "Add a session naming regression test" } },
+		{ type: "message", message: { role: "assistant", content: "Test manual session name protection", stopReason: "stop" } },
+	);
+	f.nextResponse();
+	settled = f.emit("agent_settled");
+	assert.match(f.calls[1].input.messages[0].content, /session naming regression test/);
+	assert.match(f.calls[1].input.systemPrompt, /minor changes/);
+	f.resolve();
+	await settled;
+	assert.equal(f.calls.length, 2);
+	assert.deepEqual(f.names, ["Fix Session Naming Races"]);
 });
 
 test.after(() => rmSync(agentDir, { recursive: true, force: true }));
