@@ -8,9 +8,9 @@ const configDir = join(agentDir, "extensions");
 const configPath = join(configDir, "fast.json");
 mock.module("@earendil-works/pi-coding-agent", () => ({ getAgentDir: () => agentDir }));
 const { default: fast } = await import("../extensions/fast/index.ts");
-const luna = { id: "gpt-6-luna", name: "Luna", provider: "openai-codex", api: "openai-codex-responses" };
+const luna = { id: "gpt-6-luna", name: "Luna", provider: "openai", api: "openai-responses" };
 const sol = { ...luna, id: "gpt-6-sol", name: "Sol" };
-const unsupported = { ...sol, provider: "openai" };
+const unsupported = { ...sol, provider: "other" };
 
 beforeEach(() => {
 	rmSync(configDir, { recursive: true, force: true });
@@ -187,6 +187,28 @@ test("GPT-6.1 Sol can enable Fast without a hard-coded model allowlist", async (
 	expect(h.events.before_provider_request({ payload }, h.ctx)).toEqual({ ...payload, service_tier: "priority" });
 	await h.command("off");
 	expect(h.events.before_provider_request({ payload }, h.ctx)).toBeUndefined();
+});
+
+test("legacy routes, mismatched provider/API pairs, and API-key authentication remain unsupported", async () => {
+	for (const model of [
+		{ ...sol, api: "openai-codex-responses" },
+		{ ...sol, provider: "openai-codex" },
+		{ ...sol, api: "openai-completions" },
+		{ ...luna, provider: "openai-codex", api: "openai-codex-responses" },
+	]) {
+		const h = harness([], model);
+		expect(h.events.before_provider_request({ payload: { model: model.id } }, h.ctx)).toBeUndefined();
+		await h.command("on");
+		expect(h.notices.pop()).toContain("does not support");
+		expect(existsSync(configPath)).toBe(false);
+	}
+	for (const model of [luna, sol]) {
+		const h = harness([], model, false);
+		expect(h.events.before_provider_request({ payload: { model: model.id } }, h.ctx)).toBeUndefined();
+		await h.command("on");
+		expect(h.notices.pop()).toContain("does not support");
+		expect(existsSync(configPath)).toBe(false);
+	}
 });
 
 test("parent payload safeguards preserve explicit tiers and reject mismatched or unsupported requests", () => {

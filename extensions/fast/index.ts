@@ -13,8 +13,6 @@ import {
 } from "node:fs";
 import { dirname, join } from "node:path";
 
-const PROVIDER_ID = "openai-codex";
-const API_ID = "openai-codex-responses";
 const LUNA_MODEL_ID = "gpt-6-luna";
 const SERVICE_TIER = "priority";
 const CONFIG_PATH = join(getAgentDir(), "extensions", "fast.json");
@@ -33,8 +31,8 @@ function isPayload(value: unknown): value is Payload {
 
 function isEligible(ctx: ExtensionContext, model = ctx.model): boolean {
 	return (
-		model?.provider === PROVIDER_ID &&
-		model.api === API_ID &&
+		model?.provider === "openai" &&
+		model.api === "openai-responses" &&
 		ctx.modelRegistry.isUsingOAuth(model)
 	);
 }
@@ -125,7 +123,7 @@ async function configureFast(ctx: ExtensionContext): Promise<void> {
 		// Keep unavailable saved models visible so their settings can be disabled.
 		const ids = [...new Set([...availableIds, ...config.enabledModels])].sort();
 		const labels = ids.map((id) => {
-			const current = id === ctx.model?.id && ctx.model.provider === PROVIDER_ID;
+			const current = id === ctx.model?.id && isEligible(ctx);
 			return `${id}: ${config.enabledModels.has(id) ? "On" : "Off"}${current ? " (current parent)" : ""}${availableIds.has(id) ? "" : " (unavailable)"}`;
 		});
 		const subagentLabel = `Subagent-wide setting: ${config.subagents ? "On" : "Off"}`;

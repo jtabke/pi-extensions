@@ -33,14 +33,14 @@ Focused strict type validation uses TypeScript 5.9.3 with a temporary out-of-rep
 
 ### `fast`
 
-Adds `service_tier: "priority"` to enabled ChatGPT-authenticated OpenAI Codex requests. Run `/fast` to open a configuration menu for:
+Adds `service_tier: "priority"` to enabled ChatGPT-authenticated OpenAI Responses requests. Supports only the `openai` / `openai-responses` route with ChatGPT OAuth; legacy Codex routes and API-key authentication are not supported. Run `/fast` to open a configuration menu for:
 
 - One list of parent models with saved On/Off settings, marking the current parent. Unavailable saved models can be disabled.
 - The subagent-wide On/Off setting.
 
 Menu changes and inline On/Off commands save immediately and persist across sessions; they are not temporary overrides. Escape cancels the open selection; it does not undo earlier changes. With no saved configuration, Luna is on, other parent models are off, and the subagent-wide setting is off. Priority service may increase quota usage or cost.
 
-Manually registered Codex models, including `gpt-6.1-sol`, appear in the menu when ChatGPT authentication is available. Select the model in Pi, then run `/fast on` to save its Fast setting. No extension model-list update is needed.
+Available OpenAI models, including manually registered models such as `gpt-6.1-sol`, appear in the menu when ChatGPT authentication is available. Select the model in Pi, then run `/fast on` to save its Fast setting. No extension model-list update is needed.
 
 Inline controls remain available, including without an interactive UI:
 
