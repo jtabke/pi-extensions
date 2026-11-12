@@ -173,10 +173,21 @@ export default function fast(pi: ExtensionAPI): void {
 			event.toolName !== "subagent" ||
 			!readConfig().subagents ||
 			!isPayload(event.input) ||
-			typeof event.input.workflowScript !== "string"
+			event.input.action !== undefined
 		) return;
 
-		if (event.input.fast === undefined) event.input.fast = true;
+		const input = event.input;
+		if (input.options !== undefined && !isPayload(input.options)) return;
+		const options = input.options ?? {};
+		const launchesChild =
+			(typeof input.agent === "string" && typeof input.task === "string") ||
+			input.workflow === true ||
+			(typeof input.workflow === "string" && input.workflow.trim().length > 0) ||
+			typeof options.script === "string";
+		if (!launchesChild || input.fast !== undefined || options.fast !== undefined) return;
+
+		// Current pi-subagents lowers options into launch params during execute().
+		input.options = { ...options, fast: true };
 	});
 
 	pi.registerCommand("fast", {

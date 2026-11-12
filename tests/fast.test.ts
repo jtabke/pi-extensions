@@ -73,19 +73,71 @@ test("model list saves only the selected model and supports cancelling the value
 	expect(config()).toEqual({ enabledModels: [luna.id], subagents: false });
 });
 
-test("subagent menu saves default and preserves both explicit launch overrides", async () => {
+function subagentLaunches(): Record<string, unknown>[] {
+	return [
+		{ agent: "scout", task: "Inspect the code" },
+		{ workflow: true },
+		{ workflow: "./workflow.js" },
+		{ workflow: "parallel", args: { tasks: [] } },
+		{ options: { script: "return 1" } },
+	];
+}
+
+test("subagent menu saves default and applies it to current launch forms", async () => {
 	const h = harness(["Subagent-wide", "On", "Done"]);
 	await h.command();
 	expect(config()).toEqual({ enabledModels: [luna.id], subagents: true });
-	for (const explicit of [undefined, false, true]) {
-		const input = { workflowScript: "return 1", fast: explicit };
+	for (const input of subagentLaunches()) {
 		h.events.tool_call({ toolName: "subagent", input });
-		expect(input.fast).toBe(explicit ?? true);
+		expect(input.options).toMatchObject({ fast: true });
+		expect(input).not.toHaveProperty("fast");
 	}
 	await h.command("subagents off");
-	const input = { workflowScript: "return 1" };
-	h.events.tool_call({ toolName: "subagent", input });
-	expect(input).not.toHaveProperty("fast");
+	for (const input of subagentLaunches()) {
+		const original = structuredClone(input);
+		h.events.tool_call({ toolName: "subagent", input });
+		expect(input).toEqual(original);
+	}
+});
+
+test("subagent default preserves explicit nested and flat Fast overrides and other options", () => {
+	save({ subagents: true });
+	const h = harness();
+	for (const launch of subagentLaunches()) {
+		for (const fast of [false, true]) {
+			for (const flat of [false, true]) {
+				const options = { ...(launch.options as Record<string, unknown>), timeoutMs: 1000 };
+				const input = flat ? { ...launch, options, fast } : { ...launch, options: { ...options, fast } };
+				const original = structuredClone(input);
+				h.events.tool_call({ toolName: "subagent", input });
+				expect(input).toEqual(original);
+			}
+		}
+		const input = { ...launch, options: { ...(launch.options as Record<string, unknown>), timeoutMs: 1000 } };
+		h.events.tool_call({ toolName: "subagent", input });
+		expect(input.options).toEqual({ ...(launch.options as Record<string, unknown>), timeoutMs: 1000, fast: true });
+	}
+});
+
+test("subagent default ignores management, other tools, and malformed launch inputs", () => {
+	save({ subagents: true });
+	const h = harness();
+	for (const input of [
+		{ action: "status", id: "run" },
+		{ action: "validate", workflow: true },
+		{ action: "schedule.create", workflow: "./workflow.js" },
+		{ action: "resume", agent: "scout", task: "Inspect" },
+		{}, { agent: "scout" }, { task: "Inspect" }, { workflow: false }, { workflow: "" },
+		{ workflow: true, options: null }, { workflow: true, options: [] },
+		null, [],
+	]) {
+		const original = structuredClone(input);
+		h.events.tool_call({ toolName: "subagent", input });
+		expect(input).toEqual(original);
+	}
+	const input = { agent: "scout", task: "Inspect" };
+	h.events.tool_call({ toolName: "other", input });
+	expect(input).not.toHaveProperty("options");
 });
 
 test("model list changes a different model without changing the selected parent", async () => {

@@ -66,7 +66,7 @@ Control Luna explicitly through the same command:
 /fast luna status
 ```
 
-Enable Fast mode as the default for every supported native `pi-subagents` workflow child:
+Enable Fast mode as the default for supported native `pi-subagents` single-child and workflow launches:
 
 ```text
 /fast subagents on
@@ -74,7 +74,7 @@ Enable Fast mode as the default for every supported native `pi-subagents` workfl
 /fast subagents status
 ```
 
-The subagent toggle adds `fast: true` to inline `workflowScript` launches that do not already set `fast`. Explicit `fast: true` and `fast: false` values are preserved; turning the default off does not force launches off. Fast mode supports only the native OpenAI Codex models allowed by `pi-subagents`; external runners and unsupported models fail through its normal validation.
+The subagent toggle adds `options.fast: true` to single-child `{ agent, task }` launches and workflows using a reply block (`workflow: true`), script path, named resource, or `options.script`. Explicit `options.fast: true` and `options.fast: false` values, as well as flat `fast` overrides, are preserved. Other options are retained. Management calls, including validation and scheduling, are unchanged; turning the default off does not force launches off. Fast mode supports only the native OpenAI Codex models allowed by `pi-subagents`; external runners and unsupported models fail through its normal validation. Individual workflow children can still override the workflow default.
 
 Fast mode settings are stored in `~/.pi/agent/extensions/fast.json`. On startup, the extension migrates the former `luna-fast.json` file automatically. The old `{ "enabled": boolean }` format remains compatible and controls Luna only. Models from other providers and non-ChatGPT authentication do not support this extension's parent-session Fast mode. The machine-local setting is not stored in this repository.
 
