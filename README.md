@@ -119,13 +119,15 @@ Ollama discovery is best-effort. A running Ollama service is not required for Pi
 
 ### `openai-usage`
 
-Shows OpenAI Codex OAuth rate-limit windows in the Pi status area and refreshes them after agent turns and model changes.
+Shows how to check subscription usage for the current OpenAI sign-in.
 
 ```text
 /openai-usage
 ```
 
-The extension reads the `openai-codex` provider credential from Pi. Run `/login openai-codex` if the credential is unavailable. It queries the ChatGPT usage endpoint every 60 seconds while an OpenAI Codex model is active. It does not display usage for other providers.
+- **Sign in with ChatGPT (`openai` OAuth):** shows a footer shortcut and directs you to [ChatGPT usage settings](https://chatgpt.com/settings/usage). The legacy Codex endpoint does not accept this token, so Pi does not show numeric quota windows or poll it.
+- **Legacy Codex OAuth (`openai-codex`):** shows numeric windows in the footer and refreshes from the Codex usage endpoint every 60 seconds. If the credential is unavailable, run `/login openai-codex` where that provider is supported.
+- **API keys and other providers:** no subscription usage footer. The extension does not infer a separate Ultrafast quota from the requested speed.
 
 Machine-local settings and credentials for all extensions remain outside this repository. They are not stored here.
 

@@ -3,9 +3,10 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 
-const PROVIDER = "openai-codex";
+const CODEX_PROVIDER = "openai-codex";
 const STATUS_KEY = "openai-usage";
-const USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CHATGPT_USAGE_URL = "https://chatgpt.com/settings/usage";
 const REFRESH_INTERVAL_MS = 60_000;
 const REQUEST_TIMEOUT_MS = 10_000;
 const OPENAI_AUTH_CLAIM = "https://api.openai.com/auth";
@@ -98,7 +99,7 @@ async function resolveCredentials(
   ctx: ExtensionContext,
 ): Promise<Credentials | undefined> {
   try {
-    const raw = await ctx.modelRegistry.getApiKeyForProvider(PROVIDER);
+    const raw = await ctx.modelRegistry.getApiKeyForProvider(CODEX_PROVIDER);
     return raw ? parseCredentials(raw) : undefined;
   } catch {
     return undefined;
@@ -246,35 +247,52 @@ function formatStatus(
 
 export default function (pi: ExtensionAPI) {
   let refreshTimer: ReturnType<typeof setInterval> | undefined;
-  let inFlight: Promise<string> | undefined;
+  let inFlight:
+    | { controller: AbortController; result: Promise<string> }
+    | undefined;
   let lastFetchAt = 0;
   let lastPlainStatus = "OpenAI usage unavailable";
 
-  function stopTimer(): void {
-    if (!refreshTimer) return;
-    clearInterval(refreshTimer);
+  function stopRefresh(): void {
+    if (refreshTimer) clearInterval(refreshTimer);
     refreshTimer = undefined;
+    inFlight?.controller.abort();
+    inFlight = undefined;
+    lastFetchAt = 0;
   }
 
-  function modelUsesCodex(ctx: ExtensionContext): boolean {
-    return ctx.model?.provider === PROVIDER;
+  function usageKind(ctx: ExtensionContext): "chatgpt" | "codex" | undefined {
+    const model = ctx.model;
+    if (model?.provider === "openai" && ctx.modelRegistry.isUsingOAuth(model))
+      return "chatgpt";
+    if (model?.provider === CODEX_PROVIDER && ctx.modelRegistry.isUsingOAuth(model))
+      return "codex";
+    return undefined;
   }
 
   async function fetchAndPublish(
     ctx: ExtensionContext,
     force = false,
   ): Promise<string> {
-    if (!modelUsesCodex(ctx)) {
+    const kind = usageKind(ctx);
+    if (kind === "chatgpt") {
+      // Sign in with ChatGPT tokens are not accepted by the Codex quota endpoint.
+      ctx.ui.setStatus(STATUS_KEY, "ChatGPT usage: /openai-usage");
+      return `ChatGPT subscription usage: ${CHATGPT_USAGE_URL}\nNumeric quota windows are not available for this sign-in in Pi.`;
+    }
+    if (kind !== "codex") {
       ctx.ui.setStatus(STATUS_KEY, undefined);
-      return "OpenAI usage is hidden because the active model is not using OpenAI Codex OAuth";
+      return "OpenAI subscription usage is unavailable for the active model or authentication.";
     }
 
     if (!force && Date.now() - lastFetchAt < REFRESH_INTERVAL_MS)
       return lastPlainStatus;
-    if (inFlight) return inFlight;
+    if (inFlight) return inFlight.result;
 
-    inFlight = (async () => {
+    const controller = new AbortController();
+    const result = (async () => {
       const credentials = await resolveCredentials(ctx);
+      if (controller.signal.aborted) return lastPlainStatus;
       if (!credentials) {
         lastPlainStatus = "OpenAI usage unavailable. Run /login openai-codex";
         ctx.ui.setStatus(
@@ -285,19 +303,21 @@ export default function (pi: ExtensionAPI) {
       }
 
       try {
-        const signals = [AbortSignal.timeout(REQUEST_TIMEOUT_MS)];
+        const signals = [controller.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)];
         if (ctx.signal) signals.push(ctx.signal);
-        const response = await fetch(USAGE_URL, {
+        const response = await fetch(CODEX_USAGE_URL, {
           headers: {
             accept: "application/json",
             authorization: `Bearer ${credentials.accessToken}`,
             "chatgpt-account-id": credentials.accountId,
           },
           signal: AbortSignal.any(signals),
+          redirect: "error",
         });
 
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const windows = parseWindows(await response.json(), ctx.model?.id);
+        if (controller.signal.aborted) return lastPlainStatus;
         if (windows.length === 0)
           throw new Error("No rate-limit windows in response");
 
@@ -307,6 +327,7 @@ export default function (pi: ExtensionAPI) {
         ctx.ui.setStatus(STATUS_KEY, status.styled);
         return status.plain;
       } catch (error) {
+        if (controller.signal.aborted) return lastPlainStatus;
         const message = error instanceof Error ? error.message : String(error);
         lastPlainStatus = `OpenAI usage refresh failed: ${message}`;
         ctx.ui.setStatus(
@@ -316,43 +337,38 @@ export default function (pi: ExtensionAPI) {
         return lastPlainStatus;
       }
     })().finally(() => {
-      inFlight = undefined;
+      if (inFlight?.controller === controller) inFlight = undefined;
     });
 
-    return inFlight;
+    inFlight = { controller, result };
+    return result;
   }
 
-  function startTimer(ctx: ExtensionContext): void {
-    stopTimer();
-    if (!modelUsesCodex(ctx)) return;
-
-    refreshTimer = setInterval(() => {
-      void fetchAndPublish(ctx);
-    }, REFRESH_INTERVAL_MS);
-    refreshTimer.unref?.();
+  async function refreshForModel(ctx: ExtensionContext): Promise<void> {
+    stopRefresh();
+    if (usageKind(ctx) === "codex") {
+      refreshTimer = setInterval(() => {
+        void fetchAndPublish(ctx);
+      }, REFRESH_INTERVAL_MS);
+      refreshTimer.unref?.();
+    }
+    await fetchAndPublish(ctx, true);
   }
 
-  pi.on("session_start", async (_event, ctx) => {
-    startTimer(ctx);
-    await fetchAndPublish(ctx, true);
-  });
-
-  pi.on("model_select", async (_event, ctx) => {
-    startTimer(ctx);
-    await fetchAndPublish(ctx, true);
-  });
+  pi.on("session_start", (_event, ctx) => refreshForModel(ctx));
+  pi.on("model_select", (_event, ctx) => refreshForModel(ctx));
 
   pi.on("agent_settled", async (_event, ctx) => {
     await fetchAndPublish(ctx);
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
-    stopTimer();
+    stopRefresh();
     ctx.ui.setStatus(STATUS_KEY, undefined);
   });
 
   pi.registerCommand("openai-usage", {
-    description: "Refresh and show OpenAI Codex subscription usage",
+    description: "Show ChatGPT subscription usage or refresh Codex quota windows",
     handler: async (_args, ctx) => {
       const status = await fetchAndPublish(ctx, true);
       ctx.ui.notify(
