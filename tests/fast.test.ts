@@ -27,18 +27,31 @@ function save(value: unknown, filename = "fast.json") {
 function harness(choices: (string | undefined)[] = [], model: typeof luna | undefined = sol, oauth = true, hasUI = true) {
 	const events: Record<string, Function> = {};
 	let handler: Function;
+	let completions: Function;
 	const dialogs: string[][] = [];
+	const titles: string[] = [];
+	const inputs: (string | undefined)[] = [];
+	const statuses: Record<string, string | undefined> = {};
 	const notices: string[] = [];
 	fast({
 		on: (name: string, fn: Function) => { events[name] = fn; },
-		registerCommand: (_name: string, spec: { handler: Function }) => { handler = spec.handler; },
+		registerCommand: (_name: string, spec: { handler: Function; getArgumentCompletions: Function }) => {
+			handler = spec.handler;
+			completions = spec.getArgumentCompletions;
+		},
 	} as any);
 	const ctx = {
 		model, hasUI,
 		modelRegistry: { getAvailable: () => [luna, sol, unsupported], isUsingOAuth: () => oauth },
 		ui: {
 			notify: (message: string) => notices.push(message),
-			select: async (_title: string, options: string[]) => {
+			setStatus: (key: string, value: string | undefined) => { statuses[key] = value; },
+			input: async () => {
+				expect(inputs.length).toBeGreaterThan(0);
+				return inputs.shift();
+			},
+			select: async (title: string, options: string[]) => {
+				titles.push(title);
 				dialogs.push(options);
 				expect(choices.length).toBeGreaterThan(0);
 				const prefix = choices.shift();
@@ -49,28 +62,31 @@ function harness(choices: (string | undefined)[] = [], model: typeof luna | unde
 			},
 		},
 	};
-	return { ctx, events, dialogs, notices, command: (args = "") => handler!(args, ctx) };
+	return { ctx, events, dialogs, titles, inputs, statuses, notices, command: (args = "") => handler!(args, ctx), complete: (prefix: string) => completions!(prefix) };
 }
 
-test("opening and cancelling preserves Luna-on, Sol-off, subagents-off defaults without writing", async () => {
+test("bare /fast opens the current speed directly; cancelling preserves defaults", async () => {
 	const h = harness([undefined]);
 	await h.command();
-	expect(h.dialogs[0]).toEqual([
-		`${luna.id}: On`, `${sol.id}: Off (current parent)`, "Subagent-wide setting: Off", "Done",
-	]);
+	expect(h.dialogs).toEqual([["✓ Default", "Fast"]]);
+	expect(h.titles[0]).toContain("Speed for Sol");
 	expect(existsSync(configPath)).toBe(false);
 	const payload = { model: luna.id };
 	expect(h.events.before_provider_request({ payload }, { ...h.ctx, model: luna })).toEqual({ ...payload, service_tier: "priority" });
 	expect(h.events.before_provider_request({ payload: { model: sol.id } }, h.ctx)).toBeUndefined();
 });
 
-test("model list saves only the selected model and supports cancelling the value dialog", async () => {
-	const h = harness([sol.id, undefined, sol.id, "On", "Done"]);
+test("direct speed selection saves and closes; reselecting the current speed is a no-op", async () => {
+	const h = harness(["Fast", "✓ Fast", "Default"]);
 	await h.command();
+	expect(h.dialogs).toHaveLength(1);
 	expect(config()).toEqual({ enabledModels: [sol.id, luna.id].sort(), subagents: false });
-	const next = harness([sol.id, "Off", "Done"]);
-	await next.command();
+	expect(h.statuses.fast).toBe("Fast");
+	await h.command();
+	expect(h.notices).toHaveLength(1);
+	await h.command();
 	expect(config()).toEqual({ enabledModels: [luna.id], subagents: false });
+	expect(h.statuses.fast).toBeUndefined();
 });
 
 function subagentLaunches(): Record<string, unknown>[] {
@@ -84,8 +100,8 @@ function subagentLaunches(): Record<string, unknown>[] {
 }
 
 test("subagent menu saves default and applies it to current launch forms", async () => {
-	const h = harness(["Subagent-wide", "On", "Done"]);
-	await h.command();
+	const h = harness(["On"]);
+	await h.command("subagents");
 	expect(config()).toEqual({ enabledModels: [luna.id], subagents: true });
 	for (const input of subagentLaunches()) {
 		h.events.tool_call({ toolName: "subagent", input });
@@ -140,30 +156,58 @@ test("subagent default ignores management, other tools, and malformed launch inp
 	expect(input).not.toHaveProperty("options");
 });
 
-test("model list changes a different model without changing the selected parent", async () => {
-	const h = harness([luna.id, "Off", sol.id, "On", "Done"]);
-	await h.command();
-	expect(config()).toEqual({ enabledModels: [sol.id], subagents: false });
+test("/fast models searches by name, edits another model, and leaves the active model alone", async () => {
+	const h = harness(["Default"]);
+	h.inputs.push("lu");
+	await h.command("models");
+	expect(h.titles[0]).toContain("Speed for Luna");
+	expect(h.dialogs).toEqual([["✓ Fast", "Default"]]);
+	expect(config()).toEqual({ enabledModels: [], subagents: false });
 	expect(h.ctx.model).toBe(sol);
+	expect(h.statuses.fast).toBeUndefined();
 });
 
-test("unavailable saved models can be disabled but not enabled", async () => {
+test("/fast models can select from matching models and cancel without saving", async () => {
+	const h = harness([luna.id, undefined]);
+	h.inputs.push("");
+	await h.command("models");
+	expect(h.dialogs).toEqual([
+		[`${luna.id} · Fast`, `${sol.id} · Default`],
+		["✓ Fast", "Default"],
+	]);
+	expect(existsSync(configPath)).toBe(false);
+});
+
+test("unavailable saved models can only be reset", async () => {
 	save({ enabledModels: ["retired-model"], subagents: false });
-	const h = harness(["retired-model", "On", "retired-model", "Off", "Done"]);
-	await h.command();
-	expect(h.notices[0]).toContain("unavailable");
+	const h = harness(["Default"]);
+	await h.command("models retired");
+	expect(h.dialogs).toEqual([["Default"]]);
+	expect(h.titles[0]).toContain("unavailable");
 	expect(config().enabledModels).toEqual([]);
 });
 
-test("model list does not mark a different provider's model as current or allow non-OAuth models on", async () => {
-	const h = harness(["Done"], unsupported);
+test("unsupported current models don't get a picker; non-OAuth settings are reset-only", async () => {
+	const h = harness([], unsupported);
 	await h.command();
-	expect(h.dialogs[0].some((label) => label.includes("current parent"))).toBe(false);
-	const noAuth = harness([luna.id, "On", "Done"], sol, false);
-	await noAuth.command();
-	expect(noAuth.dialogs[0]).toEqual([`${luna.id}: On (unavailable)`, "Subagent-wide setting: Off", "Done"]);
-	expect(noAuth.notices[0]).toContain("unavailable");
+	expect(h.dialogs).toEqual([]);
+	expect(h.notices[0]).toContain("does not support");
+	const noAuth = harness([undefined], sol, false);
+	await noAuth.command("models luna");
+	expect(noAuth.dialogs).toEqual([["Default"]]);
 	expect(existsSync(configPath)).toBe(false);
+});
+
+test("footer reflects the session model on startup and clears on unsupported/default models", () => {
+	const h = harness([], luna);
+	h.events.session_start({}, h.ctx);
+	expect(h.statuses.fast).toBe("Fast");
+	h.events.model_select({ model: sol }, h.ctx);
+	expect(h.statuses.fast).toBeUndefined();
+	h.events.model_select({ model: luna }, h.ctx);
+	expect(h.statuses.fast).toBe("Fast");
+	h.events.model_select({ model: { ...luna, provider: "other" } }, h.ctx);
+	expect(h.statuses.fast).toBeUndefined();
 });
 
 test("headless bare command does not enable Fast or open dialogs", async () => {
@@ -173,6 +217,15 @@ test("headless bare command does not enable Fast or open dialogs", async () => {
 	expect(existsSync(configPath)).toBe(false);
 	await h.command("on");
 	expect(config().enabledModels).toContain(sol.id);
+});
+
+test("quick current-model commands appear in argument completions", () => {
+	const h = harness();
+	expect(h.complete("").map((item: { value: string }) => item.value)).toEqual([
+		"on", "off", "ultrafast", "status", "models", "subagents",
+	]);
+	expect(h.complete("UL")).toMatchObject([{ value: "ultrafast" }]);
+	expect(h.complete("unknown")).toBeNull();
 });
 
 test("inline controls and status retain their existing behavior", async () => {
@@ -195,11 +248,11 @@ test("inline controls and status retain their existing behavior", async () => {
 test("status reports the requested scope and unsupported current models without writing", async () => {
 	const h = harness([], unsupported);
 	await h.command("status");
-	expect(h.notices.pop()).toBe("Saved Fast setting for Sol: unsupported.\nSaved subagent Fast setting: off.");
+	expect(h.notices.pop()).toBe("Saved speed for Sol: unsupported.\nSaved subagent Fast setting: off.");
 	await h.command("all status");
 	expect(h.notices.pop()).toContain("unsupported");
 	await h.command("luna status");
-	expect(h.notices.pop()).toBe("Saved Fast setting for Luna: on.");
+	expect(h.notices.pop()).toBe("Saved speed for Luna: Fast.");
 	await h.command("subagents status");
 	expect(h.notices.pop()).toBe("Saved subagent Fast setting: off.");
 	expect(existsSync(configPath)).toBe(false);
@@ -215,7 +268,7 @@ test("unsupported, unauthenticated, and missing current models cannot partially 
 			expect(existsSync(configPath)).toBe(false);
 		}
 	}
-	await missing.command("subagents");
+	await missing.command("subagents on");
 	expect(config()).toEqual({ enabledModels: [luna.id], subagents: true });
 	await missing.command("luna off");
 	expect(config()).toEqual({ enabledModels: [], subagents: true });
@@ -223,15 +276,15 @@ test("unsupported, unauthenticated, and missing current models cannot partially 
 
 test("legacy Luna settings migrate and remain visible in the menu", async () => {
 	save({ enabled: false }, "luna-fast.json");
-	const h = harness([luna.id, "On", "Done"]);
-	await h.command();
+	const h = harness(["Fast"]);
+	await h.command("models luna");
 	expect(existsSync(join(configDir, "luna-fast.json"))).toBe(false);
 	expect(config()).toEqual({ enabledModels: [luna.id], subagents: false });
 });
 
 test("GPT-6.1 Sol can enable Fast without a hard-coded model allowlist", async () => {
 	const sol61 = { ...sol, id: "gpt-6.1-sol", name: "GPT-6.1 Sol" };
-	const h = harness([sol61.id, "On", "Done"], sol61);
+	const h = harness(["Fast"], sol61);
 	h.ctx.modelRegistry.getAvailable = () => [luna, sol, sol61, unsupported];
 	await h.command();
 	expect(config()).toEqual({ enabledModels: [luna.id, sol61.id].sort(), subagents: false });
@@ -239,6 +292,50 @@ test("GPT-6.1 Sol can enable Fast without a hard-coded model allowlist", async (
 	expect(h.events.before_provider_request({ payload }, h.ctx)).toEqual({ ...payload, service_tier: "priority" });
 	await h.command("off");
 	expect(h.events.before_provider_request({ payload }, h.ctx)).toBeUndefined();
+});
+
+const sol62 = { ...sol, id: "gpt-6.2-sol", name: "GPT-6.2 Sol" };
+
+test("GPT-6.2 Sol can select Ultrafast without upgrading existing Fast settings", async () => {
+	save({ enabledModels: [luna.id, sol62.id], subagents: true });
+	const h = harness(["Ultrafast", undefined], sol62);
+	h.ctx.modelRegistry.getAvailable = () => [luna, sol62];
+	const payload = { model: sol62.id };
+	const request = (body: Record<string, unknown> = payload) => h.events.before_provider_request({ payload: body }, h.ctx);
+	expect(request()).toEqual({ ...payload, service_tier: "priority" });
+	await h.command();
+	expect(h.dialogs[0]).toEqual(["✓ Fast", "Default", "Ultrafast · higher usage"]);
+	expect(h.statuses.fast).toBe("Ultrafast");
+	await h.command();
+	expect(h.dialogs[1][0]).toBe("✓ Ultrafast · higher usage");
+	expect(config()).toEqual({ enabledModels: [luna.id, sol62.id].sort(), ultrafast: true, subagents: true });
+	expect(request()).toEqual({ ...payload, service_tier: "ultrafast" });
+	expect(request({ ...payload, service_tier: "priority" })).toBeUndefined();
+	const lunaPayload = { model: luna.id };
+	expect(h.events.before_provider_request({ payload: lunaPayload }, { ...h.ctx, model: luna }))
+		.toEqual({ ...lunaPayload, service_tier: "priority" });
+	await h.command("status");
+	expect(h.notices.pop()).toContain("GPT-6.2 Sol: Ultrafast");
+	await h.command("on");
+	expect(request()).toEqual({ ...payload, service_tier: "priority" });
+	await h.command("ultrafast");
+	expect(request()).toEqual({ ...payload, service_tier: "ultrafast" });
+	await h.command("off");
+	expect(config()).toEqual({ enabledModels: [luna.id], subagents: true });
+	expect(request()).toBeUndefined();
+});
+
+test("Ultrafast cannot be set for unsupported models, authentication, or subagent scope", async () => {
+	for (const h of [harness([], sol), harness([], sol62, false), harness([], { ...sol62, provider: "other" })]) {
+		await h.command("ultrafast");
+		expect(h.notices.pop()).toMatch(/only supported|does not support/);
+	}
+	const h = harness([], sol62);
+	for (const scope of ["all", "subagents", "luna"]) {
+		await h.command(`${scope} ultrafast`);
+		expect(h.notices.pop()).toContain("Usage:");
+	}
+	expect(existsSync(configPath)).toBe(false);
 });
 
 test("legacy routes, mismatched provider/API pairs, and API-key authentication remain unsupported", async () => {

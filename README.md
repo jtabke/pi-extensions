@@ -33,24 +33,26 @@ Focused strict type validation uses TypeScript 5.9.3 with a temporary out-of-rep
 
 ### `fast`
 
-Adds `service_tier: "priority"` to enabled ChatGPT-authenticated OpenAI Responses requests. Supports only the `openai` / `openai-responses` route with ChatGPT OAuth; legacy Codex routes and API-key authentication are not supported. Run `/fast` to open a configuration menu for:
+Adds `service_tier: "priority"` (Fast) or `service_tier: "ultrafast"` (Ultrafast for GPT-6.2 Sol) to ChatGPT-authenticated OpenAI Responses requests. Explicit request tiers are preserved. Supports only the `openai` / `openai-responses` route with ChatGPT OAuth; legacy Codex routes and API-key authentication are not supported. Run `/fast` to pick a speed directly for the current model: **Default** (no tier requested by the extension), **Fast**, or **Ultrafast** for GPT-6.2 Sol. The current speed is checked. Enter saves and closes; Esc changes nothing.
 
-- One list of parent models with saved On/Off settings, marking the current parent. Unavailable saved models can be disabled.
-- The subagent-wide On/Off setting.
+- `/fast models [filter]` edits another model's saved speed without switching models. With no filter, Pi prompts you to search by model name or ID. Unavailable saved models can be reset.
+- `/fast subagents` opens the separate subagent Fast toggle; it doesn't set Ultrafast.
+- The footer shows **Fast** or **Ultrafast** for the current model's requested speed, not the tier the backend actually served. It is blank at Default.
 
-Menu changes and inline On/Off commands save immediately and persist across sessions; they are not temporary overrides. Escape cancels the open selection; it does not undo earlier changes. With no saved configuration, Luna is on, other parent models are off, and the subagent-wide setting is off. Priority service may increase quota usage or cost.
+Menu changes and inline commands save immediately and persist across sessions; they are not temporary overrides. Escape cancels the open selection; it does not undo earlier changes. With no saved configuration, Luna is on, other parent models are off, and the subagent-wide setting is off. Fast and Ultrafast may increase quota usage or cost. Existing Fast settings are not upgraded to Ultrafast.
 
 Available OpenAI models, including manually registered models such as `gpt-6.1-sol`, appear in the menu when ChatGPT authentication is available. Select the model in Pi, then run `/fast on` to save its Fast setting. No extension model-list update is needed.
 
-Inline controls remain available, including without an interactive UI:
+Inline controls skip the picker and appear in Pi’s argument completions after `/fast `. They also work without an interactive UI:
 
 ```text
 /fast on
+/fast ultrafast
 /fast off
 /fast status
 ```
 
-`/fast status` reports both the current model and subagent settings. Control both together with:
+`/fast on` selects Fast (priority); `/fast ultrafast` selects Ultrafast for GPT-6.2 Sol only. `/fast status` reports both the current model and subagent settings. Control both together with:
 
 ```text
 /fast all on

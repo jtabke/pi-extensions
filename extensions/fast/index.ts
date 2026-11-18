@@ -14,16 +14,25 @@ import {
 import { dirname, join } from "node:path";
 
 const LUNA_MODEL_ID = "gpt-6-luna";
-const SERVICE_TIER = "priority";
+// Only offer Ultrafast where advertised by the Codex subscription catalog.
+const ULTRAFAST_MODEL_ID = "gpt-6.2-sol";
 const CONFIG_PATH = join(getAgentDir(), "extensions", "fast.json");
 const LEGACY_CONFIG_PATH = join(getAgentDir(), "extensions", "luna-fast.json");
 
 type Payload = Record<string, unknown>;
 
+type FastMode = "off" | "on" | "ultrafast";
+
 type FastConfig = {
 	enabledModels: Set<string>;
+	ultrafast: boolean;
 	subagents: boolean;
 };
+
+function getMode(config: FastConfig, modelId: string | undefined): FastMode {
+	if (!modelId || !config.enabledModels.has(modelId)) return "off";
+	return modelId === ULTRAFAST_MODEL_ID && config.ultrafast ? "ultrafast" : "on";
+}
 
 function isPayload(value: unknown): value is Payload {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -51,6 +60,7 @@ function migrateLegacyConfig(): void {
 function readConfig(): FastConfig {
 	const fallback: FastConfig = {
 		enabledModels: new Set([LUNA_MODEL_ID]),
+		ultrafast: false,
 		subagents: false,
 	};
 	const configPath = existsSync(CONFIG_PATH) ? CONFIG_PATH : LEGACY_CONFIG_PATH;
@@ -73,6 +83,7 @@ function readConfig(): FastConfig {
 
 			return {
 				enabledModels,
+				ultrafast: "ultrafast" in config && config.ultrafast === true,
 				subagents: "subagents" in config && typeof config.subagents === "boolean"
 					? config.subagents
 					: false,
@@ -90,6 +101,7 @@ function writeConfig(config: FastConfig): void {
 	const temporaryPath = `${CONFIG_PATH}.${process.pid}.${Date.now()}.tmp`;
 	const serialized = {
 		enabledModels: [...config.enabledModels].sort(),
+		...(getMode(config, ULTRAFAST_MODEL_ID) === "ultrafast" ? { ultrafast: true } : {}),
 		subagents: config.subagents,
 	};
 
@@ -101,70 +113,94 @@ function writeConfig(config: FastConfig): void {
 	}
 }
 
-function setEnabled(target: { modelId?: string; subagents?: boolean }, enabled: boolean): void {
+function setMode(target: { modelId?: string; subagents?: boolean }, mode: FastMode): void {
 	const config = readConfig();
 	if (target.modelId !== undefined) {
-		if (enabled) config.enabledModels.add(target.modelId);
-		else config.enabledModels.delete(target.modelId);
+		if (mode === "off") config.enabledModels.delete(target.modelId);
+		else config.enabledModels.add(target.modelId);
+		if (target.modelId === ULTRAFAST_MODEL_ID) config.ultrafast = mode === "ultrafast";
 	}
-	if (target.subagents) config.subagents = enabled;
+	if (target.subagents) config.subagents = mode === "on";
 	writeConfig(config);
 }
 
-async function configureFast(ctx: ExtensionContext): Promise<void> {
-	if (!ctx.hasUI) {
-		ctx.ui.notify("Use /fast on, /fast off, or /fast subagents on|off when no configuration UI is available.", "warning");
+function modeLabel(mode: FastMode): string {
+	return mode === "on" ? "Fast" : mode === "ultrafast" ? "Ultrafast" : "Default";
+}
+
+function updateStatus(ctx: ExtensionContext, model = ctx.model): void {
+	if (!ctx.hasUI) return;
+	const mode = isEligible(ctx, model) ? getMode(readConfig(), model?.id) : "off";
+	ctx.ui.setStatus("fast", mode === "off" ? undefined : modeLabel(mode));
+}
+
+async function pickSpeed(ctx: ExtensionContext, modelId: string, modelName: string, available: boolean): Promise<void> {
+	const current = getMode(readConfig(), modelId);
+	const modes: FastMode[] = ["off"];
+	if (available) {
+		modes.push("on");
+		if (modelId === ULTRAFAST_MODEL_ID) modes.push("ultrafast");
+	}
+	// Focus the current speed so accepting the first option doesn't change it.
+	const choices = modes.includes(current) ? [current, ...modes.filter((mode) => mode !== current)] : modes;
+	const labels = choices.map((mode) => `${mode === current ? "✓ " : ""}${modeLabel(mode)}${mode === "ultrafast" ? " · higher usage" : ""}`);
+	const choice = await ctx.ui.select(
+		`Speed for ${modelName} · saved across sessions${available ? "" : " · unavailable (reset only)"}`,
+		labels,
+	);
+	const mode = choice === undefined ? undefined : choices[labels.indexOf(choice)];
+	if (mode === undefined || mode === current) return;
+	setMode({ modelId }, mode);
+	updateStatus(ctx);
+	ctx.ui.notify(`${modelName} speed set to ${modeLabel(mode)}.`, "info");
+}
+
+async function pickModelSpeed(ctx: ExtensionContext, filter: string): Promise<void> {
+	const search = filter || await ctx.ui.input("Find a model by name or ID (Enter for all)", "e.g. 6.2 sol");
+	if (search === undefined) return;
+	const config = readConfig();
+	const available = new Map(ctx.modelRegistry.getAvailable()
+		.filter((model) => isEligible(ctx, model)).map((model) => [model.id, model.name]));
+	// Saved models remain resettable even if authentication or availability changes.
+	const ids = [...new Set([...available.keys(), ...config.enabledModels])].sort().filter((id) => {
+		const text = `${id} ${available.get(id) ?? ""}`.toLowerCase();
+		return search.toLowerCase().trim().split(/\s+/).every((word) => text.includes(word));
+	});
+	if (ids.length === 0) {
+		ctx.ui.notify("No matching Fast settings.", "info");
 		return;
 	}
-	while (true) {
-		const config = readConfig();
-		const availableIds = new Set(ctx.modelRegistry.getAvailable()
-			.filter((model) => isEligible(ctx, model)).map((model) => model.id));
-		// Keep unavailable saved models visible so their settings can be disabled.
-		const ids = [...new Set([...availableIds, ...config.enabledModels])].sort();
-		const labels = ids.map((id) => {
-			const current = id === ctx.model?.id && isEligible(ctx);
-			return `${id}: ${config.enabledModels.has(id) ? "On" : "Off"}${current ? " (current parent)" : ""}${availableIds.has(id) ? "" : " (unavailable)"}`;
-		});
-		const subagentLabel = `Subagent-wide setting: ${config.subagents ? "On" : "Off"}`;
-		const choice = await ctx.ui.select("Fast saved settings — changes persist; priority may increase quota/cost", [
-			...labels, subagentLabel, "Done",
-		]);
-		if (choice === undefined || choice === "Done") return;
-		const subagents = choice === subagentLabel;
-		const modelId = ids[labels.indexOf(choice)];
-		if (!subagents && modelId === undefined) continue;
-		const currentEnabled = subagents ? config.subagents : config.enabledModels.has(modelId);
-		const title = subagents
-			? "Saved subagent setting — explicit fast:true/false takes precedence"
-			: `Saved Fast setting for ${modelId}`;
-		const value = await ctx.ui.select(title, currentEnabled ? ["On", "Off"] : ["Off", "On"]);
-		if (value === undefined) continue;
-		const enabled = value === "On";
-		if (enabled && !subagents && !availableIds.has(modelId)) {
-			ctx.ui.notify("This model is unavailable or does not have supported authentication. You may disable its saved setting.", "warning");
-			continue;
-		}
-		setEnabled({ modelId, subagents }, enabled);
-	}
+	const labels = ids.map((id) => `${id} · ${modeLabel(getMode(config, id))}${available.has(id) ? "" : " (unavailable)"}`);
+	const choice = ids.length === 1 ? labels[0] : await ctx.ui.select("Choose a model to edit", labels);
+	const modelId = choice === undefined ? undefined : ids[labels.indexOf(choice)];
+	if (modelId !== undefined) await pickSpeed(ctx, modelId, available.get(modelId) ?? modelId, available.has(modelId));
+}
+
+async function pickSubagentFast(ctx: ExtensionContext): Promise<void> {
+	const enabled = readConfig().subagents;
+	const labels = enabled ? ["✓ On", "Off"] : ["✓ Off", "On"];
+	const choice = await ctx.ui.select("Subagent Fast default · explicit per-launch settings take precedence", labels);
+	if (choice !== labels[1]) return;
+	setMode({ subagents: true }, enabled ? "off" : "on");
+	ctx.ui.notify(`Saved subagent Fast setting: ${enabled ? "off" : "on"}.`, "info");
 }
 
 export default function fast(pi: ExtensionAPI): void {
 	migrateLegacyConfig();
 
+	pi.on("session_start", (_event, ctx) => updateStatus(ctx));
+	pi.on("model_select", (event, ctx) => updateStatus(ctx, event.model));
+
 	pi.on("before_provider_request", (event, ctx) => {
 		const model = ctx.model;
-		if (
-			!model ||
-			!readConfig().enabledModels.has(model.id) ||
-			!isEligible(ctx) ||
-			!isPayload(event.payload)
-		) return;
+		if (!model || !isEligible(ctx) || !isPayload(event.payload)) return;
 		if (event.payload.model !== model.id || "service_tier" in event.payload) return;
+		const mode = getMode(readConfig(), model.id);
+		if (mode === "off") return;
 
 		return {
 			...event.payload,
-			service_tier: SERVICE_TIER,
+			service_tier: mode === "ultrafast" ? "ultrafast" : "priority",
 		};
 	});
 
@@ -191,20 +227,46 @@ export default function fast(pi: ExtensionAPI): void {
 	});
 
 	pi.registerCommand("fast", {
-		description: "Configure Fast mode, or use on/off/status for the current model, Luna, or subagents",
+		description: "Pick a speed, or use on, off, ultrafast, or status for the current model",
+		getArgumentCompletions: (prefix) => {
+			const matches = [
+				{ value: "on", label: "on", description: "Select Fast for the current model" },
+				{ value: "off", label: "off", description: "Reset the current model to Default" },
+				{ value: "ultrafast", label: "ultrafast", description: "Select Ultrafast for GPT-6.2 Sol" },
+				{ value: "status", label: "status", description: "Show the saved speed and subagent setting" },
+				{ value: "models", label: "models", description: "Find and edit another model" },
+				{ value: "subagents", label: "subagents", description: "Configure the subagent Fast default" },
+			].filter(({ value }) => value.startsWith(prefix.trimStart().toLowerCase()));
+			return matches.length ? matches : null;
+		},
 		handler: async (args, ctx) => {
-			if (!args.trim()) {
-				await configureFast(ctx);
+			const input = args.trim();
+			const parts = input.toLowerCase().split(/\s+/).filter(Boolean);
+			if (!input || parts[0] === "models" || input.toLowerCase() === "subagents") {
+				if (!ctx.hasUI) {
+					ctx.ui.notify("Use /fast on|off|ultrafast|status or /fast subagents on|off|status without a UI.", "warning");
+					return;
+				}
+				if (parts[0] === "models") {
+					await pickModelSpeed(ctx, input.slice("models".length).trim());
+				} else if (parts[0] === "subagents") {
+					await pickSubagentFast(ctx);
+				} else if (ctx.model && isEligible(ctx)) {
+					await pickSpeed(ctx, ctx.model.id, ctx.model.name, true);
+				} else {
+					ctx.ui.notify("The current model or authentication does not support this Fast mode. Use /fast models to manage other models.", "warning");
+				}
 				return;
 			}
-			const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
 			const target = parts[0] === "luna" || parts[0] === "subagents" || parts[0] === "all"
 				? parts[0]
 				: "current";
 			const action = (target === "current" ? parts[0] : parts[1]) || "on";
-			const usage = "Usage: /fast [on | off | status] | /fast all [on | off | status] | /fast luna [on | off | status] | /fast subagents [on | off | status]";
+			const usage = "Usage: /fast [on | off | status | ultrafast] | /fast models [filter] | /fast all [on | off | status] | /fast luna [on | off | status] | /fast subagents [on | off | status]";
 
-			if (parts.length > (target === "current" ? 1 : 2) || !["on", "off", "status"].includes(action)) {
+			if (parts.length > (target === "current" ? 1 : 2) || (
+				action !== "on" && action !== "off" && action !== "status" && !(target === "current" && action === "ultrafast")
+			)) {
 				ctx.ui.notify(usage, "warning");
 				return;
 			}
@@ -219,8 +281,8 @@ export default function fast(pi: ExtensionAPI): void {
 				const lines: string[] = [];
 				if (target !== "subagents") {
 					const status = usesCurrentModel && !isEligible(ctx)
-						? "unsupported" : modelId && config.enabledModels.has(modelId) ? "on" : "off";
-					lines.push(`Saved Fast setting for ${modelName}: ${status}.`);
+						? "unsupported" : getMode(config, modelId);
+					lines.push(`Saved speed for ${modelName}: ${status === "unsupported" ? status : modeLabel(status)}.`);
 				}
 				if (target !== "luna") lines.push(`Saved subagent Fast setting: ${config.subagents ? "on" : "off"}.`);
 				ctx.ui.notify(lines.join("\n"), "info");
@@ -231,9 +293,16 @@ export default function fast(pi: ExtensionAPI): void {
 				ctx.ui.notify("The current model or authentication does not support this Fast mode.", "warning");
 				return;
 			}
-			setEnabled({ modelId, subagents }, action === "on");
-			const label = target === "subagents" ? "subagents" : `${modelName}${subagents ? " and subagents" : ""}`;
-			ctx.ui.notify(`Saved Fast setting is ${action} for ${label}.`, "info");
+			if (action === "ultrafast" && modelId !== ULTRAFAST_MODEL_ID) {
+				ctx.ui.notify("Ultrafast is only supported for GPT-6.2 Sol.", "warning");
+				return;
+			}
+			setMode({ modelId, subagents }, action);
+			if (modelId !== undefined) updateStatus(ctx);
+			const lines: string[] = [];
+			if (modelId !== undefined) lines.push(`${modelName} speed set to ${modeLabel(action)}.`);
+			if (subagents) lines.push(`Saved subagent Fast setting: ${action}.`);
+			ctx.ui.notify(lines.join("\n"), "info");
 		},
 	});
 }
