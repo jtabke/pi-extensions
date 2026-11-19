@@ -37,7 +37,7 @@ Adds `service_tier: "priority"` (Fast) or `service_tier: "ultrafast"` (Ultrafast
 
 - `/fast models [filter]` edits another model's saved speed without switching models. With no filter, Pi prompts you to search by model name or ID. Unavailable saved models can be reset.
 - `/fast subagents` opens the separate subagent Fast toggle; it doesn't set Ultrafast.
-- The footer shows **Fast** or **Ultrafast** for the current model's requested speed, not the tier the backend actually served. It is blank at Default.
+- The terminal footer shows the current model's requested speed: **Default** (dim), **Fast** (theme accent), or **Ultrafast** (warning color). This is not the tier the backend actually served. RPC hosts keep the previous plain Fast/Ultrafast statuses and are blank at Default.
 
 Menu changes and inline commands save immediately and persist across sessions; they are not temporary overrides. Escape cancels the open selection; it does not undo earlier changes. With no saved configuration, Luna is on, other parent models are off, and the subagent-wide setting is off. Fast and Ultrafast may increase quota usage or cost. Existing Fast settings are not upgraded to Ultrafast.
 
@@ -119,15 +119,16 @@ Ollama discovery is best-effort. A running Ollama service is not required for Pi
 
 ### `openai-usage`
 
-Shows how to check subscription usage for the current OpenAI sign-in.
+Shows quota in Pi's terminal footer while an OpenAI OAuth model is active. The meter does not publish status to RPC hosts such as T3; quota details remain available on demand:
 
 ```text
 /openai-usage
+/openai-usage codex
 ```
 
-- **Sign in with ChatGPT (`openai` OAuth):** shows a footer shortcut and directs you to [ChatGPT usage settings](https://chatgpt.com/settings/usage). The legacy Codex endpoint does not accept this token, so Pi does not show numeric quota windows or poll it.
-- **Legacy Codex OAuth (`openai-codex`):** shows numeric windows in the footer and refreshes from the Codex usage endpoint every 60 seconds. If the credential is unavailable, run `/login openai-codex` where that provider is supported.
-- **API keys and other providers:** no subscription usage footer. The extension does not infer a separate Ultrafast quota from the requested speed.
+- **Sign in with ChatGPT (`openai` OAuth):** shows the locally signed-in Codex CLI's main quota windows in the footer and refreshes them every minute in the background. The label is **Codex quota**, not Pi quota. Remaining quota uses the theme's success color above 40%, warning from 21–40%, and error at 20% or less. Each window with a reset time shows a T3-style pace: **Ahead of pace** is more than five percentage points above the elapsed share of the window, **Under pace** is more than five points below, and otherwise it is **On pace**. Pace is colored separately: warning for Ahead, success for Under, and muted for On pace. `/openai-usage` also shows reset times, any additional returned buckets, and a link to [ChatGPT usage settings](https://chatgpt.com/settings/usage) for Pi's sign-in.
+- **Legacy Codex OAuth (`openai-codex`):** shows numeric windows from the Codex usage endpoint using the active Pi login. If the credential is unavailable, run `/login openai-codex` where that provider is supported.
+- **API keys and other providers:** no automatic quota footer. Run `/openai-usage codex` from any model to query the locally signed-in Codex CLI on demand. The CLI read does not open credential files or start a model turn. No separate Ultrafast quota is inferred from the requested speed.
 
 Machine-local settings and credentials for all extensions remain outside this repository. They are not stored here.
 

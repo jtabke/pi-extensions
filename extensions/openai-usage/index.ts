@@ -2,6 +2,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { readCodexRateLimits } from "./codex-rate-limits.js";
 
 const CODEX_PROVIDER = "openai-codex";
 const STATUS_KEY = "openai-usage";
@@ -217,27 +218,73 @@ function formatReset(seconds: number): string {
   return `${minutes}m`;
 }
 
+function windowAmount(window: DisplayWindow): string {
+  return `${window.label} ${formatPercent(window.remainingPercent)}% left`;
+}
+
+function amountColor(window: DisplayWindow): "error" | "warning" | "success" {
+  if (window.remainingPercent <= 20) return "error";
+  if (window.remainingPercent <= 40) return "warning";
+  return "success";
+}
+
+function formatWindow(window: DisplayWindow): string {
+  const reset =
+    window.resetAfterSeconds === undefined
+      ? ""
+      : `, resets in ${formatReset(window.resetAfterSeconds)}`;
+  return windowAmount(window) + reset;
+}
+
+function windowPace(window: DisplayWindow) {
+  if (window.resetAfterSeconds === undefined) return undefined;
+  // T3 compares quota used with the percentage of the reset window elapsed.
+  const elapsed = Math.max(0, Math.min(1, 1 - window.resetAfterSeconds / window.durationSeconds));
+  const gap = 100 - window.remainingPercent - elapsed * 100;
+  if (gap > 5) return { text: "Ahead of pace", color: "warning" } as const;
+  if (gap < -5) return { text: "Under pace", color: "success" } as const;
+  return { text: "On pace", color: "muted" } as const;
+}
+
+function formatCodexQuota(raw: unknown, theme?: ExtensionContext["ui"]["theme"]): string | undefined {
+  const result = asRecord(raw);
+  const formatBucket = (key: string, value: unknown): string | undefined => {
+    const bucket = asRecord(value);
+    if (!bucket) return undefined;
+    const windows = [bucket.primary, bucket.secondary]
+      .map(asRecord)
+      .map((window) => parseWindow({
+        used_percent: window?.usedPercent,
+        limit_window_minutes: window?.windowDurationMins,
+        reset_at: window?.resetsAt,
+      }))
+      .filter((window): window is DisplayWindow => window !== undefined)
+      .sort((a, b) => a.durationSeconds - b.durationSeconds);
+    if (windows.length === 0) return undefined;
+    const name = key === "codex" ? "" :
+      (typeof bucket.limitName === "string" ? bucket.limitName : key).replace(/[^a-zA-Z0-9 ._()-]/g, "").trim().slice(0, 60);
+    const summary = windows.map((window) => {
+      const amount = theme ? theme.fg(amountColor(window), windowAmount(window)) : formatWindow(window);
+      const pace = windowPace(window);
+      return pace ? amount + " · " + (theme ? theme.fg(pace.color, pace.text) : pace.text) : amount;
+    });
+    const label = `Codex quota${name ? ` (${name})` : ""}:`;
+    return `${theme ? theme.fg("dim", label) : label} ${summary.join(" | ")}`;
+  };
+  const byId = asRecord(result?.rateLimitsByLimitId);
+  if (theme) return formatBucket("codex", byId?.codex) ?? formatBucket("codex", result?.rateLimits);
+  const buckets = Object.entries(byId ?? {})
+    .map(([key, value]) => formatBucket(key, value))
+    .filter((line): line is string => line !== undefined);
+  return buckets.length ? buckets.join("\n") : formatBucket("codex", result?.rateLimits);
+}
+
 function formatStatus(
   ctx: ExtensionContext,
   windows: DisplayWindow[],
 ): { styled: string; plain: string } {
-  const styledParts = windows.map((window) => {
-    const value = `${window.label} ${formatPercent(window.remainingPercent)}% left`;
-    const color =
-      window.remainingPercent <= 20
-        ? "error"
-        : window.remainingPercent <= 40
-          ? "warning"
-          : "success";
-    return ctx.ui.theme.fg(color, value);
-  });
-  const plainParts = windows.map((window) => {
-    const reset =
-      window.resetAfterSeconds === undefined
-        ? ""
-        : `, resets in ${formatReset(window.resetAfterSeconds)}`;
-    return `${window.label} ${formatPercent(window.remainingPercent)}% left${reset}`;
-  });
+  const styledParts = windows.map((window) => ctx.ui.theme.fg(amountColor(window), windowAmount(window)));
+  const plainParts = windows.map(formatWindow);
 
   return {
     styled: `${ctx.ui.theme.fg("dim", "OpenAI:")} ${styledParts.join(ctx.ui.theme.fg("dim", " · "))}`,
@@ -251,6 +298,7 @@ export default function (pi: ExtensionAPI) {
     | { controller: AbortController; result: Promise<string> }
     | undefined;
   let lastFetchAt = 0;
+  let activeSource: string | undefined;
   let lastPlainStatus = "OpenAI usage unavailable";
 
   function stopRefresh(): void {
@@ -259,6 +307,12 @@ export default function (pi: ExtensionAPI) {
     inFlight?.controller.abort();
     inFlight = undefined;
     lastFetchAt = 0;
+  }
+
+  // setStatus also emits RPC UI events. Keep the automatic meter in Pi's
+  // terminal footer rather than surfacing it in hosts such as T3.
+  function setFooter(ctx: ExtensionContext, text?: string): void {
+    if (ctx.mode === "tui") ctx.ui.setStatus(STATUS_KEY, text);
   }
 
   function usageKind(ctx: ExtensionContext): "chatgpt" | "codex" | undefined {
@@ -270,72 +324,61 @@ export default function (pi: ExtensionAPI) {
     return undefined;
   }
 
+  async function fetchLegacyQuota(ctx: ExtensionContext, signal: AbortSignal) {
+    const credentials = await resolveCredentials(ctx);
+    signal.throwIfAborted();
+    if (!credentials) throw new Error("Run /login openai-codex.");
+    const response = await fetch(CODEX_USAGE_URL, {
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${credentials.accessToken}`,
+        "chatgpt-account-id": credentials.accountId,
+      },
+      signal: AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]),
+      redirect: "error",
+    });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const windows = parseWindows(await response.json(), ctx.model?.id);
+    if (windows.length === 0) throw new Error("No rate-limit windows in response.");
+    return formatStatus(ctx, windows);
+  }
+
+  async function fetchCliQuota(ctx: ExtensionContext, signal: AbortSignal) {
+    const result = await readCodexRateLimits(signal);
+    const plain = formatCodexQuota(result);
+    if (!plain) throw new Error("Codex did not report any quota windows for this login.");
+    const styled = ctx.mode === "tui" ? formatCodexQuota(result, ctx.ui.theme) : undefined;
+    return { plain, styled };
+  }
+
   async function fetchAndPublish(
     ctx: ExtensionContext,
     force = false,
   ): Promise<string> {
     const kind = usageKind(ctx);
-    if (kind === "chatgpt") {
-      // Sign in with ChatGPT tokens are not accepted by the Codex quota endpoint.
-      ctx.ui.setStatus(STATUS_KEY, "ChatGPT usage: /openai-usage");
-      return `ChatGPT subscription usage: ${CHATGPT_USAGE_URL}\nNumeric quota windows are not available for this sign-in in Pi.`;
-    }
-    if (kind !== "codex") {
-      ctx.ui.setStatus(STATUS_KEY, undefined);
-      return "OpenAI subscription usage is unavailable for the active model or authentication.";
-    }
-
+    if (!kind) return "OpenAI subscription usage is unavailable for the active model or authentication.";
+    if (inFlight) return inFlight.result;
     if (!force && Date.now() - lastFetchAt < REFRESH_INTERVAL_MS)
       return lastPlainStatus;
-    if (inFlight) return inFlight.result;
 
     const controller = new AbortController();
+    lastFetchAt = Date.now();
     const result = (async () => {
-      const credentials = await resolveCredentials(ctx);
-      if (controller.signal.aborted) return lastPlainStatus;
-      if (!credentials) {
-        lastPlainStatus = "OpenAI usage unavailable. Run /login openai-codex";
-        ctx.ui.setStatus(
-          STATUS_KEY,
-          ctx.ui.theme.fg("warning", lastPlainStatus),
-        );
-        return lastPlainStatus;
-      }
-
       try {
-        const signals = [controller.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)];
-        if (ctx.signal) signals.push(ctx.signal);
-        const response = await fetch(CODEX_USAGE_URL, {
-          headers: {
-            accept: "application/json",
-            authorization: `Bearer ${credentials.accessToken}`,
-            "chatgpt-account-id": credentials.accountId,
-          },
-          signal: AbortSignal.any(signals),
-          redirect: "error",
-        });
-
-        if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const windows = parseWindows(await response.json(), ctx.model?.id);
+        const status = kind === "chatgpt"
+          ? await fetchCliQuota(ctx, controller.signal)
+          : await fetchLegacyQuota(ctx, controller.signal);
         if (controller.signal.aborted) return lastPlainStatus;
-        if (windows.length === 0)
-          throw new Error("No rate-limit windows in response");
-
-        const status = formatStatus(ctx, windows);
-        lastFetchAt = Date.now();
         lastPlainStatus = status.plain;
-        ctx.ui.setStatus(STATUS_KEY, status.styled);
-        return status.plain;
+        setFooter(ctx, status.styled);
       } catch (error) {
         if (controller.signal.aborted) return lastPlainStatus;
-        const message = error instanceof Error ? error.message : String(error);
-        lastPlainStatus = `OpenAI usage refresh failed: ${message}`;
-        ctx.ui.setStatus(
-          STATUS_KEY,
-          ctx.ui.theme.fg("warning", lastPlainStatus),
-        );
-        return lastPlainStatus;
+        const message = error instanceof Error ? error.message : "Could not read quota.";
+        const label = kind === "chatgpt" ? "Codex quota unavailable" : "OpenAI usage unavailable";
+        lastPlainStatus = `${label}: ${message}`;
+        setFooter(ctx, ctx.ui.theme.fg("warning", label));
       }
+      return lastPlainStatus;
     })().finally(() => {
       if (inFlight?.controller === controller) inFlight = undefined;
     });
@@ -344,39 +387,63 @@ export default function (pi: ExtensionAPI) {
     return result;
   }
 
-  async function refreshForModel(ctx: ExtensionContext): Promise<void> {
+  function refreshForModel(ctx: ExtensionContext): void {
+    if (ctx.mode !== "tui") return;
+    const kind = usageKind(ctx);
+    // The CLI reports Codex account quota, so switching between Pi OpenAI
+    // models does not require restarting the read.
+    const source = kind === "codex" ? `legacy:${ctx.model?.id}` : kind;
+    if (source === activeSource) return;
+    activeSource = source;
     stopRefresh();
-    if (usageKind(ctx) === "codex") {
-      refreshTimer = setInterval(() => {
-        void fetchAndPublish(ctx);
-      }, REFRESH_INTERVAL_MS);
-      refreshTimer.unref?.();
-    }
-    await fetchAndPublish(ctx, true);
+    setFooter(ctx);
+    if (!source) return;
+
+    void fetchAndPublish(ctx);
+    refreshTimer = setInterval(() => { void fetchAndPublish(ctx); }, REFRESH_INTERVAL_MS);
+    refreshTimer.unref?.();
   }
 
   pi.on("session_start", (_event, ctx) => refreshForModel(ctx));
   pi.on("model_select", (_event, ctx) => refreshForModel(ctx));
-
-  pi.on("agent_settled", async (_event, ctx) => {
-    await fetchAndPublish(ctx);
+  pi.on("agent_settled", (_event, ctx) => {
+    if (ctx.mode === "tui") void fetchAndPublish(ctx);
   });
-
   pi.on("session_shutdown", (_event, ctx) => {
+    activeSource = undefined;
     stopRefresh();
-    ctx.ui.setStatus(STATUS_KEY, undefined);
+    setFooter(ctx);
   });
 
   pi.registerCommand("openai-usage", {
-    description: "Show ChatGPT subscription usage or refresh Codex quota windows",
-    handler: async (_args, ctx) => {
+    description: "Show quota details and reset times; add codex to query the local CLI from any model",
+    getArgumentCompletions: (prefix) => "codex".startsWith(prefix.trim().toLowerCase())
+      ? [{ value: "codex", label: "codex", description: "Show quota from the signed-in Codex CLI" }]
+      : null,
+    handler: async (args, ctx) => {
+      const option = args.trim().toLowerCase();
+      if (option === "codex") {
+        if (usageKind(ctx) === "chatgpt") {
+          const status = await fetchAndPublish(ctx, true);
+          ctx.ui.notify(status, status.startsWith("Codex quota unavailable") ? "warning" : "info");
+          return;
+        }
+        try {
+          const status = formatCodexQuota(await readCodexRateLimits(ctx.signal));
+          if (status) ctx.ui.notify(status, "info");
+          else ctx.ui.notify("Codex did not report any quota windows for this login.", "warning");
+        } catch (error) {
+          ctx.ui.notify(error instanceof Error ? error.message : "Could not read Codex quota.", "warning");
+        }
+        return;
+      }
+      if (option) {
+        ctx.ui.notify("Usage: /openai-usage [codex]", "warning");
+        return;
+      }
       const status = await fetchAndPublish(ctx, true);
-      ctx.ui.notify(
-        status,
-        status.includes("failed") || status.includes("unavailable")
-          ? "warning"
-          : "info",
-      );
+      const link = usageKind(ctx) === "chatgpt" ? `\nPi sign-in usage: ${CHATGPT_USAGE_URL}` : "";
+      ctx.ui.notify(status + link, status.includes("unavailable") ? "warning" : "info");
     },
   });
 }

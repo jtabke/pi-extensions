@@ -130,8 +130,17 @@ function modeLabel(mode: FastMode): string {
 
 function updateStatus(ctx: ExtensionContext, model = ctx.model): void {
 	if (!ctx.hasUI) return;
-	const mode = isEligible(ctx, model) ? getMode(readConfig(), model?.id) : "off";
-	ctx.ui.setStatus("fast", mode === "off" ? undefined : modeLabel(mode));
+	if (!isEligible(ctx, model)) {
+		ctx.ui.setStatus("fast", undefined);
+		return;
+	}
+	const mode = getMode(readConfig(), model?.id);
+	if (ctx.mode !== "tui") {
+		ctx.ui.setStatus("fast", mode === "off" ? undefined : modeLabel(mode));
+		return;
+	}
+	const color = mode === "off" ? "dim" : mode === "on" ? "accent" : "warning";
+	ctx.ui.setStatus("fast", ctx.ui.theme.fg(color, modeLabel(mode)));
 }
 
 async function pickSpeed(ctx: ExtensionContext, modelId: string, modelName: string, available: boolean): Promise<void> {

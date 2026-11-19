@@ -24,7 +24,7 @@ function save(value: unknown, filename = "fast.json") {
 	mkdirSync(configDir, { recursive: true });
 	writeFileSync(join(configDir, filename), JSON.stringify(value));
 }
-function harness(choices: (string | undefined)[] = [], model: typeof luna | undefined = sol, oauth = true, hasUI = true) {
+function harness(choices: (string | undefined)[] = [], model: typeof luna | undefined = sol, oauth = true, hasUI = true, mode = "tui") {
 	const events: Record<string, Function> = {};
 	let handler: Function;
 	let completions: Function;
@@ -41,11 +41,12 @@ function harness(choices: (string | undefined)[] = [], model: typeof luna | unde
 		},
 	} as any);
 	const ctx = {
-		model, hasUI,
+		model, hasUI, mode,
 		modelRegistry: { getAvailable: () => [luna, sol, unsupported], isUsingOAuth: () => oauth },
 		ui: {
 			notify: (message: string) => notices.push(message),
 			setStatus: (key: string, value: string | undefined) => { statuses[key] = value; },
+			theme: { fg: (color: string, value: string) => `[${color}]${value}` },
 			input: async () => {
 				expect(inputs.length).toBeGreaterThan(0);
 				return inputs.shift();
@@ -81,12 +82,12 @@ test("direct speed selection saves and closes; reselecting the current speed is 
 	await h.command();
 	expect(h.dialogs).toHaveLength(1);
 	expect(config()).toEqual({ enabledModels: [sol.id, luna.id].sort(), subagents: false });
-	expect(h.statuses.fast).toBe("Fast");
+	expect(h.statuses.fast).toBe("[accent]Fast");
 	await h.command();
 	expect(h.notices).toHaveLength(1);
 	await h.command();
 	expect(config()).toEqual({ enabledModels: [luna.id], subagents: false });
-	expect(h.statuses.fast).toBeUndefined();
+	expect(h.statuses.fast).toBe("[dim]Default");
 });
 
 function subagentLaunches(): Record<string, unknown>[] {
@@ -164,7 +165,7 @@ test("/fast models searches by name, edits another model, and leaves the active 
 	expect(h.dialogs).toEqual([["✓ Fast", "Default"]]);
 	expect(config()).toEqual({ enabledModels: [], subagents: false });
 	expect(h.ctx.model).toBe(sol);
-	expect(h.statuses.fast).toBeUndefined();
+	expect(h.statuses.fast).toBe("[dim]Default");
 });
 
 test("/fast models can select from matching models and cancel without saving", async () => {
@@ -198,15 +199,23 @@ test("unsupported current models don't get a picker; non-OAuth settings are rese
 	expect(existsSync(configPath)).toBe(false);
 });
 
-test("footer reflects the session model on startup and clears on unsupported/default models", () => {
+test("terminal footer styles Default and Fast, and clears for unsupported models", () => {
 	const h = harness([], luna);
+	h.events.session_start({}, h.ctx);
+	expect(h.statuses.fast).toBe("[accent]Fast");
+	h.events.model_select({ model: sol }, h.ctx);
+	expect(h.statuses.fast).toBe("[dim]Default");
+	h.events.model_select({ model: luna }, h.ctx);
+	expect(h.statuses.fast).toBe("[accent]Fast");
+	h.events.model_select({ model: { ...luna, provider: "other" } }, h.ctx);
+	expect(h.statuses.fast).toBeUndefined();
+});
+
+test("RPC speed status remains plain and does not publish Default", () => {
+	const h = harness([], luna, true, true, "rpc");
 	h.events.session_start({}, h.ctx);
 	expect(h.statuses.fast).toBe("Fast");
 	h.events.model_select({ model: sol }, h.ctx);
-	expect(h.statuses.fast).toBeUndefined();
-	h.events.model_select({ model: luna }, h.ctx);
-	expect(h.statuses.fast).toBe("Fast");
-	h.events.model_select({ model: { ...luna, provider: "other" } }, h.ctx);
 	expect(h.statuses.fast).toBeUndefined();
 });
 
@@ -305,7 +314,7 @@ test("GPT-6.2 Sol can select Ultrafast without upgrading existing Fast settings"
 	expect(request()).toEqual({ ...payload, service_tier: "priority" });
 	await h.command();
 	expect(h.dialogs[0]).toEqual(["✓ Fast", "Default", "Ultrafast · higher usage"]);
-	expect(h.statuses.fast).toBe("Ultrafast");
+	expect(h.statuses.fast).toBe("[warning]Ultrafast");
 	await h.command();
 	expect(h.dialogs[1][0]).toBe("✓ Ultrafast · higher usage");
 	expect(config()).toEqual({ enabledModels: [luna.id, sol62.id].sort(), ultrafast: true, subagents: true });
